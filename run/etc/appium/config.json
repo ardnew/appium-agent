@@ -1,0 +1,46 @@
+{
+  "server": {
+    "address": "0.0.0.0",
+    "allow-cors": true,
+    "allow-insecure": [],
+    "base-path": "/",
+    "callback-address": "0.0.0.0",
+    "callback-port": 4723,
+    "debug-log-spacing": true,
+    "default-capabilities": {
+      "appium:options": {
+        "automationName": "XCUITest",
+        "platformVersion": "18.0",
+        "udid": "00008101-0005499E010B001E",
+        "bundleId": "com.ardnew.Example",
+        "noReset": true
+      }
+    },
+    "deny-insecure": [],
+    "driver": {
+      "xcuitest": {}
+    },
+    "keep-alive-timeout": 600,
+    "local-timezone": true,
+    "log": "/var/log/appium/server.log",
+    "log-level": "debug:debug",
+    "log-no-colors": false,
+    "log-timestamp": true,
+    "long-stacktrace": true,
+    "no-perms-check": false,
+    "nodeconfig": {},
+    "plugin": {},
+    "port": 4723,
+    "relaxed-security": false,
+    "session-override": false,
+    "strict-caps": false,
+    "tmp": "/var/tmp/appium",
+    "trace-dir": "/var/log/appium/trace",
+    "use-drivers": [
+      "xcuitest"
+    ],
+    "use-plugins": [
+      "execute-driver"
+    ]
+  }
+}
