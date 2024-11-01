@@ -2,21 +2,23 @@ package main
 
 import (
 	"bufio"
-	"flag"
+	"errors"
 	"fmt"
 	"io"
 	"log"
-	"maps"
 	"os"
 	"os/exec"
-	"slices"
+	"path/filepath"
 	"strings"
 
 	"github.com/ardnew/appium-agent/command"
 	"github.com/ardnew/appium-agent/config"
 	"github.com/ardnew/appium-agent/status"
+	flag "github.com/spf13/pflag"
 	"golang.org/x/sync/errgroup"
 )
+
+var Version = "0.2.0"
 
 func main() {
 	var (
@@ -34,7 +36,22 @@ func main() {
 
 	if exe, err = initCommand(cmd); err == nil {
 		if err = initConfig(cfg); err == nil {
-			if err = parseFlags(cfg, cmd); err == nil {
+			var tmpConfig string
+			if tmpConfig, err = parseFlags(cfg, cmd); err == nil {
+				exe.Env = exe.Environ()
+				if tmpConfig != "" {
+					export := fmt.Sprintf("%s=%s", command.AppiumdConfigIdent, tmpConfig)
+					fmt.Printf("NOTE: using temporary Appium configuration:\n\t%s\n", export)
+					exe.Env = append(exe.Env, export)
+				}
+				if cmd.SkipBuild {
+					exe.Env = append(exe.Env, fmt.Sprintf("%s=%s", command.RestartAppiumIdent, "true"))
+				}
+				if cmd.ForceRestart {
+					if err = command.KillAll(exe); err != nil {
+						err = fmt.Errorf("kill all Appium services: %w", err)
+					}
+				}
 				err = run(exe)
 			}
 		}
@@ -56,64 +73,125 @@ func initCommand(cmd *command.Model) (*exec.Cmd, error) {
 	return exec.Command(sh, arg...), nil
 }
 
-func parseFlags(cfg *config.Model, cmd *command.Model) error {
-	dryRun, overwrite := false, false
-	flag.StringVar(&cmd.ScriptPath, "appium-init", cmd.ScriptPath, "`path` to Appium init script")
-	flag.StringVar(&cmd.ShellPath, "appium-init-shell", cmd.ShellPath, "`path` of shell to run Appium init script")
-	flag.StringVar(&cfg.Project, "target-app-source", cfg.Project, "`path` to Xcode project")
-	flag.StringVar(&cfg.Target, "target-device", cfg.Target, "target device `UUID`")
-	flag.BoolFunc("target-simulator", "use iPad Simulator target device", cfg.TargetSimulatorFlagHandler())
-	flag.BoolVar(&cfg.Trace, "v", cfg.Trace, "verbose trace output")
-	flag.StringVar(&cfg.Action, "xcodebuild-action", cfg.Action, "Xcode build `action`")
-	// flag.StringVar(&cfg.server, "u", "", "Appium REST server URL")
-	flag.StringVar(&cfg.AppID, "target-app-bundle", cfg.AppID, "`bundle` identifier of app under test")
-	flag.StringVar(&cfg.DrvID, "test-driver-bundle", cfg.DrvID, "`bundle` identifier of test driver app")
-	flag.StringVar(&cfg.DrvDev, "wda-network", cfg.DrvDev, "connect to WDA via network `interface`")
-	flag.IntVar(&cfg.DrvPort, "wda-port", cfg.DrvPort, "connect to WDA on TCP `port`")
-	flag.StringVar(&cfg.SrvDev, "listen-network", cfg.SrvDev, "bind Appium REST server to network `interface`")
-	flag.IntVar(&cfg.SrvPort, "listen-port", cfg.SrvPort, "bind Appium REST server to TCP `port`")
-	flag.BoolVar(&overwrite, "overwrite-config", false, "write Appium configuration to file")
-	flag.BoolVar(&dryRun, "dryrun", false, "print configuration and launch command")
-	flag.Parse()
+func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
+	bin, err := os.Executable()
+	if err != nil {
+		bin = os.Args[0]
+	}
+	bin = filepath.Base(bin)
 
-	envFlags := maps.Values(cfg.Env)
-	slices.SortedFunc(envFlags,
-		func(a, b config.EnvVar) int {
-			return strings.Compare(a.Flag, b.Flag)
-		})
-	sortedEnvFlags := slices.Collect(envFlags)
-
-	flag.Visit(func(f *flag.Flag) {
-		// If any configuration flag was set, we will overwrite the configuration file
-		_, isConfigFlag := slices.BinarySearchFunc(
-			sortedEnvFlags,
-			config.EnvVar{Flag: f.Name},
-			func(a, b config.EnvVar) int {
-				return strings.Compare(a.Flag, b.Flag)
-			})
-		overwrite = overwrite || isConfigFlag
-	})
-
-	if err := cfg.Update(); err != nil {
-		return fmt.Errorf("validate Appium configuration: %w", err)
+	fset, verbose, dryRun, overwrite := makeFlagSet(bin, cfg, cmd)
+	if err = fset.Parse(os.Args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
+		return "", fmt.Errorf("parse command line flags: %w", err)
 	}
 
-	if dryRun {
+	// Determine if we are running with modified configuration.
+	//
+	// First, the flags were all initialized
+	// with default, hard-coded values
+	// in makeFlagSet() above.
+	//
+	// Next, we identify which values were given via command-line flags
+	// and mark them as user-defined.
+	// This is important because we need to know which variables to override
+	// with values inherited from the environment below
+	//  (user-defined command-line flags take precedence).
+	//
+	// Here, we override all configuration parameters
+	// that were defined via command-line flags
+	//  (and mark them accordingly with .UserDef = true).
+	modifyConfig := cfg.ApplyToFlags(fset.Visit, // only those that were set
+		func(v *config.Var) bool { v.UserDef = true; return true },
+	)
+
+	// We now need to override any configuration parameters
+	// found in the environment that were not already set via command-line flags.
+	cfg.Env = cfg.Env.Override(cfg.Orphan, cfg.Zero)
+
+	if *dryRun {
 		// Print configuration and launch command to stdout, then exit.
-		if err := writeConfig(os.Stdout, cfg, cmd); err != nil {
-			return fmt.Errorf("generate Appium configuration: %w", err)
+		if err = writeConfig(os.Stdout, cfg, cmd); err != nil {
+			return "", fmt.Errorf("generate Appium configuration: %w", err)
 		}
 		os.Exit(0)
 	}
 
-	if overwrite {
-		// Backup and write config to file (tee to stdout if -v flag is set).
-		if err := install(cfg, cmd, cfg.Trace, os.Stdout); err != nil {
-			return fmt.Errorf("install Appium configuration: %w", err)
+	if err = cfg.Validate(); err != nil {
+		return "", fmt.Errorf("validate Appium configuration: %w", err)
+	}
+
+	var tmpConfig string
+	if modifyConfig {
+		if *overwrite {
+			// Backup and write config to default file path
+			//  (tee to stdout if --verbose flag is set).
+			if err = install(cfg, cmd, *verbose, os.Stdout); err != nil {
+				return "", fmt.Errorf("install Appium configuration: %w", err)
+			}
+		} else {
+			// Write config to a temporary file without backup
+			//  (tee to stdout if --verbose flag is set).
+			if tmpConfig, err = scratch(cfg, cmd, bin, *verbose, os.Stdout); err != nil {
+				return "", fmt.Errorf("install Appium configuration (temp): %w", err)
+			}
 		}
 	}
 
-	return nil
+	// tmpConfig is defined only if the user has overridden a config parameter
+	// but is NOT saving the configuration to the default config file.
+	// This allows for one-off test runs without committing anything to disk.
+	return tmpConfig, nil
+}
+
+func makeFlagSet(
+	bin string, cfg *config.Model, cmd *command.Model,
+) (fset *flag.FlagSet, verbose, dryRun, overwrite *bool) {
+	fset = flag.NewFlagSet(bin, flag.ContinueOnError)
+	verbose = new(bool)
+	dryRun = new(bool)
+	overwrite = new(bool)
+	fset.StringVarP(&cmd.ScriptPath, "appium-init", "i", cmd.ScriptPath,
+		"`path` to Appium init script")
+	fset.StringVarP(&cmd.ShellPath, "appium-init-shell", "e", cmd.ShellPath,
+		"`path` of shell to run Appium init script")
+	fset.BoolVarP(&cmd.ForceRestart, "kill-with-fire", "f", cmd.ForceRestart,
+		"Kill all running Appium services before starting")
+	fset.BoolVarP(&cmd.SkipBuild, "restart-appium", "r", cmd.SkipBuild,
+		"Restart Appium without building the target app or test driver")
+	fset.BoolVarP(overwrite, "overwrite-config", "w", false,
+		"Write Appium configuration to file")
+	fset.BoolVarP(dryRun, "dryrun", "y", false,
+		"Print configuration and launch command")
+	fset.BoolVarP(&cfg.Orphan, "orphan", "j", false,
+		"Do not inherit configuration parameters from current environment\n"+
+			"(combine with -z to use command-line flags only)")
+	fset.BoolVarP(&cfg.Zero, "zero", "z", false,
+		"Do not initialize default configuration parameters\n"+
+			"(use command-line flags or environment variables only)")
+	fset.BoolVarP(verbose, "verbose", "v", false,
+		"Increase output verbosity")
+	opVar := []*config.Var{}
+	fset.VisitAll(func(f *flag.Flag) {
+		typ := config.ParseType(f.Value.Type())
+		val := f.Value.String()
+		opVar = append(opVar, config.NewVar(f.Name, f.Shorthand, "", typ, val, f.Usage))
+	})
+	for i := range cfg.Env {
+		f := fset.VarPF(
+			cfg.Env[i],
+			cfg.Env[i].Flag,
+			cfg.Env[i].PFlag,
+			strings.Join(cfg.Env[i].Comment, " "),
+		)
+		if cfg.Env[i].IsBoolFlag() {
+			f.NoOptDefVal = "true"
+		}
+	}
+	fset.Usage = cfg.Env.Usage(bin, Version, opVar...)
+	return
 }
 
 func install(cfg *config.Model, cmd *command.Model, tee bool, wTee ...io.Writer) error {
@@ -139,6 +217,26 @@ func install(cfg *config.Model, cmd *command.Model, tee bool, wTee ...io.Writer)
 		wAll = io.MultiWriter(a...)
 	}
 	return writeConfig(wAll, cfg, cmd)
+}
+
+func scratch(cfg *config.Model, cmd *command.Model, base string, tee bool, wTee ...io.Writer) (string, error) {
+	path, err := config.LookupTempConfig(base, "config.env")
+	if err != nil {
+		return "", fmt.Errorf("resolve temporary Appium configuration: %w", err)
+	}
+	out, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644) //nolint:gomnd,mnd
+	if err != nil {
+		return "", fmt.Errorf("%w: %q: %w", status.ErrOpenFile, path, err)
+	}
+	defer out.Close()
+	var wAll io.Writer = out
+	if tee && len(wTee) > 0 {
+		a := make([]io.Writer, 0, len(wTee)+1)
+		a = append(a, out)
+		a = append(a, wTee...)
+		wAll = io.MultiWriter(a...)
+	}
+	return path, writeConfig(wAll, cfg, cmd)
 }
 
 func writeConfig(out io.Writer, cfg *config.Model, cmd *command.Model) error {

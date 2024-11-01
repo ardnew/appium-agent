@@ -4,15 +4,16 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/ardnew/appium-agent/status"
 )
 
 type Model struct {
-	ShellPath  string
-	ShellArgs  []string
-	ScriptPath string
+	ShellPath    string
+	ShellArgs    []string
+	ScriptPath   string
+	ForceRestart bool
+	SkipBuild    bool
 }
 
 func (m *Model) Init() error {
@@ -28,7 +29,7 @@ func (m *Model) Init() error {
 		// See comment above `c.shellPath = "SHELL"` for reason of the following.
 		m.ScriptPath = "FSDS_PREFIX"
 		if root, ok := os.LookupEnv(m.ScriptPath); ok {
-			m.ScriptPath = filepath.Join(root, "libexec", "appiumd.zsh")
+			m.ScriptPath = AppiumdDefaultInit(root)
 		}
 	}
 	if m.ShellPath == "SHELL" { // SHELL variable not found in env

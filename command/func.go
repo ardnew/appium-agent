@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -102,4 +103,8 @@ func ParseShebangFrom(path string) (string, []string, error) {
 		return "", nil, err
 	}
 	return ParseShebang(line)
+}
+
+func KillAll(cmd *exec.Cmd) error {
+	return exec.Command("tmux", "kill-session", "-t", AppiumdTmuxSession).Run()
 }

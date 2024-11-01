@@ -17,7 +17,7 @@
 #  a truthy value either in the environment from which this script is invoked,
 #  or in the environment configuration script located at:
 #
-#   • ${root}/run/etc/appium/config.env
+#   • ${FSDS_ROOT}/run/etc/appium/config.env
 #
 #  Passing the flag `-v` to appium-agent will also enable "trace_agent". 
 #  You do not have to edit any files or modify your environment in that case.
@@ -60,11 +60,21 @@ logserv="${root}/var/log/appium/session.log"
 logdrvr="${root}/var/log/appium/driver.log"
 cfglock="${root}/var/run/appium/session.lock"
 cfgjson="${root}/etc/appium/config.json"
+wdalock="${root}/var/run/appium/build.lock"
+genprop="${root}/libexec/genprops.zsh"
+expoipa="${root}/var/ipa/app.ipa"
 numjobs=$( nproc )
 
 # Source the dynamic settings from a sh-formatted file
-[[ ! -r "${cfgjson%.json}.env" ]] ||
-  . "${cfgjson%.json}.env"
+if [[ -r "${appium_config_env}" ]]; then
+  . "${appium_config_env}"
+else
+  [[ ! -r "${cfgjson%.json}.env" ]] ||
+    . "${cfgjson%.json}.env"
+fi
+
+[[ ! -x "${genprop}" ]] ||
+  . "${genprop}"
 
 truth ${trace_agent} && set -x
 
@@ -95,9 +105,25 @@ rotate() {
   done
 }
 
+srcroot() {
+  # Check for the existence of some relative path to determine if we are in the
+  # correct directory
+  curr=${1:-${proj_source}}
+  check=${2:-'Source/Xcode'} # Only valid from root directory
+
+  [ -d "${curr}" ] || curr=$( dirname "${curr}" )
+
+  cd "${curr}"
+  while [ "${PWD}" != "/" ]; do
+    [ ! -e "${check}" ] || { pwd ; return }
+    cd ..
+  done
+  return 1
+}
+
 # Usage:
 #
-#   build [xcodeproj] [destination] [action]
+#   build [sdkversion] [xcodeproj] [scheme] [config] [destination] [iosversion] [action ...]
 #
 # All arguments are optional. Undef and empty arguments use globally-defined 
 # default values; most are sourced from "${root}/etc/appium/config.env".
@@ -105,20 +131,40 @@ rotate() {
 # To specify an argument that appears after deferred/defaulted arguments, use 
 # an empty string as placeholder:
 #
-#   # Override argument $3, but use the default values for $1 and $2
-#   build '' '' run
+#   # Override argument $2 and $4, but use the default values everywhere else
+#   build '' foo '' bar
 #
 build() {
-  local xcargs
-  xcargs+=( -project "'${1:-${project_src}}'" )
-  xcargs+=( -scheme "'Example'" )
-  xcargs+=( -destination "'${2:-${target_dest}}'" )
+  local xcargs action=${xcbuild_act}
+  (( $# < 7 )) || action="${@:7}"
+
+  xcargs+=( -sdk "'iphoneos${1:-${sdk_version}}'" )
+  xcargs+=( -project "'${2:-${proj_source}}'" )
+  xcargs+=( -scheme "'${3:-${test_scheme}}'" )
+  xcargs+=( -configuration "'${4:-${test_config}}'" )
+  xcargs+=( -destination "'${5:-${target_dest}}'" )
   xcargs+=( -jobs "'${numjobs}'" )
   # The following is required when auto-provisioning is enabled to allow 
   # automatic renewal of expired profiles (and certificates).
-  xcargs+=( -allowProvisioningUpdates ) 
-  xcargs+=( "'${3:-${xcbuild_act}}'" )
-  echo xcodebuild ${xcargs}
+  xcargs+=( -allowProvisioningUpdates -allowProvisioningDeviceRegistration )
+  xcargs+=( "'IPHONEOS_DEPLOYMENT_TARGET=${6:-${ios_version}}'" )
+
+  echo xcodebuild ${xcargs} ${action}
+}
+
+makeipa() {
+  local proj=${proj_source##*/}
+  local base=${self##*/}
+  local ipapath="${expoipa%/*}/${base%.*sh}-${date}"
+  local builder=$( srcroot ) || return 127
+  
+  builder="${builder}/Extra/Scripts/build-release.sh"
+  [ -x "${builder}" ] || return 126
+
+  # build and symlink to the common path expected by Appium / test scripts
+  "${builder}" -c release -x "${proj_scheme}, ${proj_config}" -k "iphoneos${sdk_version}" -i "${ios_version}" "${ipapath}" &&
+    ipa=$( find "${ipapath}" -type f -name "${proj%.xcodeproj}.ipa" ) &&
+      ln -sf "${ipa}" "${expoipa}"
 }
 
 exists() {
@@ -170,18 +216,64 @@ ifaddr() {
 }
 
 config() {
+
   mkdir -p "${cfglock%/*}"
   if [[ -f "${cfglock}" ]]; then
     echo 'config: appium config already locked' |& tee -a "${logserv}"
     return 1
   fi
+  
+  # Always define the following options
   local opts=(
+    # Required capabilities
     'automationName: "XCUITest"'
     'platformVersion: env.sdk_version'
+
+    'useNewWDA: true'
+    #'useSimpleBuildTest: true'
+
+    # Appium/WebDriverAgent optimizations
+    'shouldUseSingletonTestManager: false'
+    'waitForQuiescence: false'
+    'screenshotQuality: 2' # [0=highest .. 2=lowest]
+
+    # The following is required when auto-provisioning is enabled to allow 
+    # automatic renewal of expired profiles (and certificates).
+    'allowProvisioningUpdates: true'
+    'allowProvisioningDeviceRegistration: true'
+
+    'showXcodeLog: true'
+    'showIOSLog: env.trace_agent' 
+
+    # Access to keychain is required for use with code signing assets
+    'keychainPath: "/Users/fsds/Library/Keychains/login.keychain-db"'
+    'keychainPassword: "fsdspass"'
+
+    # TBD: Determine if this can be used to detect cached build artifacts and
+    #      reduce compilation/install times.
+    #
+    #   | proj=${proj_source##*/}
+    #   | export derived_dat="${proj_source%/${projo}}/DerivedData/${proj%.xcodeproj}"
+    #
+    #'derivedDataPath: env.derived_dat'
+
+    # Facebook's modern device automation utility
+    #'launchWithIDB: true'
+
+    # These need to be predefined in the Xcode project.
+    #'xcodeOrgId: "T3BRA85ATJ"'
+    #'xcodeSigningId: "iPhone Developer"'
   )
+
+  # Override service URL with local TCP port forwarding
+  #[ x${service_url} != x ] || 
+  #  export service_url="http://localhost:${driver_port}"
+
+  # Add the following options iff the corresponding env var is defined
   declare -A append=(
     [webDriverAgentUrl]=service_url
     [updatedWDABundleId]=bundled_drv
+    [wdaLocalPort]=driver_port
   )
   local prebuilt=false
   for key ref in "${(@kv)append}"; do
@@ -199,11 +291,14 @@ config() {
   else
     opts+=( 'deviceName: env.target_dest' )
   fi
-  # If the user specifies an existing app, launch it instead of building and
-  # installing a new instance.
-  (( ${+bundled_app} )) || opts+=( 
+
+  [ x${app_id} = x ] || export bundled_app=${app_id}
+  opts+=(
     'bundleId: env.bundled_app'
     'noReset: true'
+    'autoLaunch: true' # launch app under test (not test driver)
+    'shouldTerminateApp: true'
+    'forceAppLaunch: true'
   )
   local query=$(
     jqfilter "{ ${(j:,:)opts} }" server default-capabilities appium:options
@@ -222,20 +317,24 @@ create() {
   # rotate our log files
   rotate "${logdrvr}" "${logserv}" &>/dev/null
 
-  # create a new tmux session containing 1 pane with our WDA driver build/run
-  # output and 1 pane with our Appium service output. both panes tee all of
-  # their output to stdout and their own individual log files in "var/log/".
-  tmux new-session -d -c "${2}" -s "${1}" -n "${1}" \
-    zsh -i -c "$( build ) |& tee -a '${logdrvr}'" 
+  # if ${appium_restart} is non-empty, then skip building the target app and 
+  # test driver, and proceed immediately to launch Appium
+  if [[ x${appium_restart} == x ]]; then
 
-  # give the previous command a moment to create our log file before starting
-  # to poll it for the server URL
-  sleep 1
-  tail -f "${logdrvr}" &
-  if service_url=$( perl "${root}/libexec/wdayield.pl" "${logdrvr}" ); then
-    export service_url
-  else
-    tmux kill-session -t "${1}"
+    # build and install the Calc App .ipa for installation on target device
+    makeipa || return
+
+    # If there exists a named capture group "Keep", then trigger will export
+    # the captured pattern as ${TRIGGER_PATTERN} for the triggered command.
+    url=$( trigger -a ${logdrvr} \
+      '/ServerURLHere->(?P<Keep>http://[0-9\.]+:[0-9]+)<-ServerURLHere/' \
+      -- zsh -i -c "$( build ) &" \
+      ++ zsh -c 'echo ${TRIGGER_PATTERN}' ) 
+
+    # use local TCP port forwarding via USB (usbmuxd) instead of direct TCP/IP
+    #url=$( sed -E 's/^([^\/]+\/\/)[^:]+(:[0-9]+)$/\1localhost\2/' <<< ${url} )
+
+    export service_url=${url}
   fi
 
   # construct Appium configuration file "config.json" and exec arguments
@@ -243,15 +342,11 @@ create() {
   local args=(
     --address "$( ifaddr "${listen_name}" )"
     --port "${listen_port}"
-    --driver-xcuitest-webdriveragent-port "${driver_port}"
   )
 
-  # fire off Appium in its own tmux pane, zoom the server pane
-	tmux split-window -d -t "${1}" -Z \
-    zsh -i -c "appium server ${args} --config '${cfgjson}' |& tee -a '${logserv}'" 
-
-  # show the Appium pane zoomed
-  tmux select-pane -t "${1}" -l -Z
+  # fire off Appium in its own tmux session
+  tmux new-session -d -c "${2}" -s "${1}" -n "${1}" \
+    zsh -i -c "appium server ${args} --config '${cfgjson}' |& tee -p -a '${logserv}'" 
 }
 
 # ------------------------------------------------------------------------------
