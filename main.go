@@ -9,13 +9,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+
+	flag "github.com/spf13/pflag"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/ardnew/appium-agent/command"
 	"github.com/ardnew/appium-agent/config"
 	"github.com/ardnew/appium-agent/status"
-	flag "github.com/spf13/pflag"
-	"golang.org/x/sync/errgroup"
 )
 
 var Version = "0.2.0"
@@ -35,7 +37,7 @@ func main() {
 	cmd := new(command.Model)
 
 	if exe, err = initCommand(cmd); err == nil {
-		if err = initConfig(cfg); err == nil {
+		if err = initConfig(cfg, cmd); err == nil {
 			var tmpConfig string
 			if tmpConfig, err = parseFlags(cfg, cmd); err == nil {
 				exe.Env = exe.Environ()
@@ -58,8 +60,8 @@ func main() {
 	}
 }
 
-func initConfig(cfg *config.Model) error {
-	if err := cfg.Init(); err != nil {
+func initConfig(cfg *config.Model, cmd *command.Model) error {
+	if err := cfg.Init(cmd); err != nil {
 		return fmt.Errorf("initialize Appium configuration: %w", err)
 	}
 	return nil
@@ -106,6 +108,25 @@ func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
 	modifyConfig := cfg.ApplyToFlags(fset.Visit, // only those that were set
 		func(v *config.Var) bool { v.UserDef = true; return true },
 	)
+
+	if cfg.Debug {
+		i, found := slices.BinarySearchFunc(
+			cfg.Env, &config.Var{Flag: "build-config"}, config.OrderByFlag,
+		)
+		if found && !cfg.Env[i].UserDef {
+			cfg.Env[i].Value = "Debug"
+		}
+		i, found = slices.BinarySearchFunc(
+			cfg.Env, &config.Var{Flag: "target-app-bundle"}, config.OrderByFlag,
+		)
+		if found && !cfg.Env[i].UserDef {
+			id := strings.Split(cfg.Env[i].String(), ".")
+			if len(id) > 0 {
+				id[len(id)-1] = "Debug"
+			}
+			cfg.Env[i].Set(strings.Join(id, "."))
+		}
+	}
 
 	// We now need to override any configuration parameters
 	// found in the environment that were not already set via command-line flags.
@@ -161,6 +182,8 @@ func makeFlagSet(
 		"Kill all running Appium services before starting")
 	fset.BoolVarP(&cmd.SkipBuild, "restart-appium", "r", cmd.SkipBuild,
 		"Restart Appium without building the target app or test driver")
+	fset.BoolVarP(&cfg.Debug, "debug-config", "g", false,
+		"Use the target debug configuration by default")
 	fset.BoolVarP(overwrite, "overwrite-config", "w", false,
 		"Write Appium configuration to file")
 	fset.BoolVarP(dryRun, "dryrun", "y", false,
@@ -277,9 +300,7 @@ func run(exe *exec.Cmd) error {
 	if err := exe.Run(); err != nil {
 		return fmt.Errorf("exec.Command: %w", err)
 	}
-	if err := grp.Wait(); err != nil {
-		return fmt.Errorf("copy output from exec.Command: %w", err)
-	}
+	grp.Wait()
 
 	return nil
 }

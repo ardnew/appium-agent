@@ -19,12 +19,12 @@
 #
 #   • ${FSDS_ROOT}/run/etc/appium/config.env
 #
-#  Passing the flag `-v` to appium-agent will also enable "trace_agent". 
+#  Passing the flag `-v` to appium-agent will also enable "trace_agent".
 #  You do not have to edit any files or modify your environment in that case.
 #
-#  Debug output will be printed to stdout if run manually from a command-line. 
-#  Otherwise, if run by launchctl, the debug output will be printed to the 
-#  stdout log file path defined in the service configuration, e.g.: 
+#  Debug output will be printed to stdout if run manually from a command-line.
+#  Otherwise, if run by launchctl, the debug output will be printed to the
+#  stdout log file path defined in the service configuration, e.g.:
 #
 #   • ~/Library/LaunchAgents/appium.plist
 #
@@ -89,7 +89,7 @@ rotate() {
   for log in "${@}"; do
     base=${log##*/}
     # move the given file into the backup dir (if it exists)
-    [[ ! -f "${log}" ]] || 
+    [[ ! -f "${log}" ]] ||
       mv "${log}" "${logback}/${base%.log}.${date}.log"
     # replace it with a new, empty log file
     touch "${log}"
@@ -99,8 +99,8 @@ rotate() {
     while read -re name; do
       [[ ! -f "${logback}/${name}" ]] ||
         rm -f "${logback}/${name}"
-    done < <( 
-      command ls -1rt "${logback}/${base%.log}."*".log" | head -n -${retain} 
+    done < <(
+      command ls -1rt "${logback}/${base%.log}."*".log" | head -n -${retain}
     )
   done
 }
@@ -125,10 +125,10 @@ srcroot() {
 #
 #   build [sdkversion] [xcodeproj] [scheme] [config] [destination] [iosversion] [action ...]
 #
-# All arguments are optional. Undef and empty arguments use globally-defined 
+# All arguments are optional. Undef and empty arguments use globally-defined
 # default values; most are sourced from "${root}/etc/appium/config.env".
 #
-# To specify an argument that appears after deferred/defaulted arguments, use 
+# To specify an argument that appears after deferred/defaulted arguments, use
 # an empty string as placeholder:
 #
 #   # Override argument $2 and $4, but use the default values everywhere else
@@ -144,7 +144,7 @@ build() {
   xcargs+=( -configuration "'${4:-${test_config}}'" )
   xcargs+=( -destination "'${5:-${target_dest}}'" )
   xcargs+=( -jobs "'${numjobs}'" )
-  # The following is required when auto-provisioning is enabled to allow 
+  # The following is required when auto-provisioning is enabled to allow
   # automatic renewal of expired profiles (and certificates).
   xcargs+=( -allowProvisioningUpdates -allowProvisioningDeviceRegistration )
   xcargs+=( "'IPHONEOS_DEPLOYMENT_TARGET=${6:-${ios_version}}'" )
@@ -157,7 +157,7 @@ makeipa() {
   local base=${self##*/}
   local ipapath="${expoipa%/*}/${base%.*sh}-${date}"
   local builder=$( srcroot ) || return 127
-  
+
   builder="${builder}/Extra/Scripts/build-release.sh"
   [ -x "${builder}" ] || return 126
 
@@ -201,8 +201,8 @@ jqfilter() {
 
 ifaddr() {
   # echo the IPv4 address of the given interface name, e.g., "en0".
-  active=$( 
-    echo "${1}" | 
+  active=$(
+    echo "${1}" |
     perl -anle'
       BEGIN { $u = `ifconfig -ul` }
       print if ( ($_) = grep { /\S/ && $u=~/\b\Q$_\E\b/ } @F )
@@ -210,8 +210,8 @@ ifaddr() {
   )
   # Need to use BSD cut for -w flag (not GNU)
   cut='/usr/bin/cut'
-  ifconfig ${active} | 
-    command grep -oE 'inet\s+[0-9.]+' | 
+  ifconfig ${active} |
+    command grep -oE 'inet\s+[0-9.]+' |
     "${cut}" -sw -f2
 }
 
@@ -222,7 +222,7 @@ config() {
     echo 'config: appium config already locked' |& tee -a "${logserv}"
     return 1
   fi
-  
+
   # Always define the following options
   local opts=(
     # Required capabilities
@@ -237,13 +237,13 @@ config() {
     'waitForQuiescence: false'
     'screenshotQuality: 2' # [0=highest .. 2=lowest]
 
-    # The following is required when auto-provisioning is enabled to allow 
+    # The following is required when auto-provisioning is enabled to allow
     # automatic renewal of expired profiles (and certificates).
     'allowProvisioningUpdates: true'
     'allowProvisioningDeviceRegistration: true'
 
     'showXcodeLog: true'
-    'showIOSLog: env.trace_agent' 
+    'showIOSLog: env.trace_agent'
 
     # Access to keychain is required for use with code signing assets
     'keychainPath: "/Users/fsds/Library/Keychains/login.keychain-db"'
@@ -266,7 +266,7 @@ config() {
   )
 
   # Override service URL with local TCP port forwarding
-  #[ x${service_url} != x ] || 
+  #[ x${service_url} != x ] ||
   #  export service_url="http://localhost:${driver_port}"
 
   # Add the following options iff the corresponding env var is defined
@@ -282,7 +282,7 @@ config() {
     prebuilt=true
   done
   ${prebuilt} && opts+=( 'usePrebuiltWDA: true' )
-  
+
   # If target_dest begins with "id=", then interpret it as a hardware UDID.
   # Otherwise, the device is specified by the more user-friendly common name.
   if [[ "${target_dest}" == "id="* ]]; then
@@ -317,7 +317,7 @@ create() {
   # rotate our log files
   rotate "${logdrvr}" "${logserv}" &>/dev/null
 
-  # if ${appium_restart} is non-empty, then skip building the target app and 
+  # if ${appium_restart} is non-empty, then skip building the target app and
   # test driver, and proceed immediately to launch Appium
   if [[ x${appium_restart} == x ]]; then
 
@@ -329,7 +329,7 @@ create() {
     url=$( trigger -a ${logdrvr} \
       '/ServerURLHere->(?P<Keep>http://[0-9\.]+:[0-9]+)<-ServerURLHere/' \
       -- zsh -i -c "$( build ) &" \
-      ++ zsh -c 'echo ${TRIGGER_PATTERN}' ) 
+      ++ zsh -c 'echo ${TRIGGER_PATTERN}' )
 
     # use local TCP port forwarding via USB (usbmuxd) instead of direct TCP/IP
     #url=$( sed -E 's/^([^\/]+\/\/)[^:]+(:[0-9]+)$/\1localhost\2/' <<< ${url} )
@@ -346,7 +346,7 @@ create() {
 
   # fire off Appium in its own tmux session
   tmux new-session -d -c "${2}" -s "${1}" -n "${1}" \
-    zsh -i -c "appium server ${args} --config '${cfgjson}' |& tee -p -a '${logserv}'" 
+    zsh -i -c "appium server ${args} --config '${cfgjson}' |& tee -p -a '${logserv}'"
 }
 
 # ------------------------------------------------------------------------------
@@ -358,4 +358,4 @@ exists "$session" || create "$session" "$startin"
 
 # Always turn off execution trace, though this usually isn't necessary
 # (unless the script is being sourced for some reason).
-set +x 
+set +x

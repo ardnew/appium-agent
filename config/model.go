@@ -11,18 +11,22 @@ import (
 
 	flag "github.com/spf13/pflag"
 
+	"github.com/ardnew/appium-agent/command"
 	"github.com/ardnew/appium-agent/status"
 )
 
 type Model struct {
+	Cmd      *command.Model
 	Env      Env
 	EnvQuote rune
 	Orphan   bool
 	Zero     bool
+	Debug    bool
 }
 
-func (m *Model) Init() error {
-	m.Env = DefaultEnv().Sort(orderByFlag)
+func (m *Model) Init(cmd *command.Model) error {
+	m.Cmd = cmd
+	m.Env = DefaultEnv().Sort(OrderByFlag)
 	m.EnvQuote = DefaultEnvQuote
 	return nil
 }
@@ -32,7 +36,7 @@ func (m *Model) ApplyToFlags(visit func(func(f *flag.Flag)), apply func(*Var) bo
 	visit(
 		func(f *flag.Flag) {
 			i, found := slices.BinarySearchFunc(
-				m.Env, &Var{Flag: f.Name}, orderByFlag,
+				m.Env, &Var{Flag: f.Name}, OrderByFlag,
 			)
 			if found {
 				result = apply(m.Env[i]) || result
@@ -105,12 +109,13 @@ func (m *Model) String() string {
 			fullVal := val.String()
 			trimVal := strings.TrimSpace(fullVal)
 			switch val.VType {
-			case Int, Float:
-				str.WriteString(trimVal) // Don't quote numbers
-			case Bool, String, JSON, Serial:
-				if strings.HasPrefix(trimVal, "$(") && strings.HasSuffix(trimVal, ")") {
+			case Int, Float, Bool:
+				str.WriteString(trimVal) // Don't quote numbers or booleans
+			case String, JSON, Serial:
+				switch {
+				case strings.HasPrefix(trimVal, "$(") && strings.HasSuffix(trimVal, ")"):
 					str.WriteString(trimVal) // Don't quote command substitution
-				} else {
+				default:
 					str.WriteRune(m.EnvQuote) // Quote everything else,
 					str.WriteString(fullVal)  //  and retain untrimmed values.
 					str.WriteRune(m.EnvQuote)

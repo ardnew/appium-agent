@@ -1,2 +1,3 @@
 /.vscode
 /appium-agent
+.DS_Store

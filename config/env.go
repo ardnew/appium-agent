@@ -29,6 +29,7 @@ func DefaultEnv() Env {
 		"",
 		"Directory `path` of the target app source code"))
 	env = append(env, NewVar("build-config", "c", "proj_config", String,
+		// "Debug",
 		"Release",
 		"Build target app using `config` from the selected scheme defined in Xcode project file"))
 	env = append(env, NewVar("build-scheme", "s", "proj_scheme", String,
@@ -41,6 +42,7 @@ func DefaultEnv() Env {
 		"FMPS Calculator",
 		"Build test driver using `scheme` defined in Xcode project file"))
 	env = append(env, NewVar("target-app-bundle", "a", "bundled_app", String,
+		// "com.NorthropGrumman.FMPS-Calculator.Debug",
 		"com.NorthropGrumman.FMPS-Calculator.App",
 		"Bundle `ID` of the target app"))
 	env = append(env, NewVar("test-driver-bundle", "b", "bundled_drv", String,
@@ -64,7 +66,7 @@ func DefaultEnv() Env {
 	env = append(env, NewVar("xcodebuild-action", "x", "xcbuild_act", String,
 		"test",
 		"Run xcodebuild(1) `action` on the target app source code"))
-	env = append(env, NewVar("trace", "g", "trace_agent", Bool,
+	env = append(env, NewVar("trace", "G", "trace_agent", Bool,
 		false,
 		"Print each command in the Appium init script before it is executed",
 		"(useful for debugging)"))
@@ -103,7 +105,7 @@ func (e Env) Override(orphan, zero bool) Env {
 	return e
 }
 
-func orderByFlag(a, b *Var) int {
+func OrderByFlag(a, b *Var) int {
 	return strings.Compare(a.Flag, b.Flag)
 }
 
