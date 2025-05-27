@@ -17,6 +17,7 @@ type Order func(a, b *Var) int
 func DefaultEnv() Env {
 	// Define the default environment variable / command-line flags.
 	env := make(Env, 0, 32)
+
 	env = append(env, NewVar("sdk-version", "k", "sdk_version", String,
 		"$( xcrun --sdk iphoneos --show-sdk-version )",
 		"Specify the iOS/iPadOS SDK platform `version` used by WebDriverAgent compilation host",
@@ -25,51 +26,60 @@ func DefaultEnv() Env {
 		"13.2",
 		"Specify the deployment target iOS/iPadOS `version`",
 		"(build setting: IPHONEOS_DEPLOYMENT_TARGET)"))
+
 	env = append(env, NewVar("target-app-source", "p", "proj_source", String,
 		"",
 		"Directory `path` of the target app source code"))
-	env = append(env, NewVar("build-config", "c", "proj_config", String,
+
+	env = append(env, NewVar("target-device", "d", "target_dest", String,
+		"id=00008101-0005499E010B001E",
+		"Target `UUID` of the device under test"))
+
+	env = append(env, NewVar("target-app-config", "c", "proj_config", String,
 		// "Debug",
 		"Release",
 		"Build target app using `config` from the selected scheme defined in Xcode project file"))
-	env = append(env, NewVar("build-scheme", "s", "proj_scheme", String,
+	env = append(env, NewVar("target-app-scheme", "s", "proj_scheme", String,
 		"FMPS Calculator",
 		"Build target app using `scheme` defined in Xcode project file"))
+	env = append(env, NewVar("target-app-bundle", "a", "bundled_app", String,
+		// "com.NorthropGrumman.FMPS-Calculator.Debug", // set with --debug-config (-g)
+		"com.NorthropGrumman.FMPS-Calculator.App",
+		"Bundle `ID` of the target app"))
+
 	env = append(env, NewVar("test-driver-config", "C", "test_config", String,
 		"Release",
 		"Build test driver using `config` from the selected scheme defined in Xcode project file"))
 	env = append(env, NewVar("test-driver-scheme", "S", "test_scheme", String,
 		"FMPS Calculator",
 		"Build test driver using `scheme` defined in Xcode project file"))
-	env = append(env, NewVar("target-app-bundle", "a", "bundled_app", String,
-		// "com.NorthropGrumman.FMPS-Calculator.Debug",
-		"com.NorthropGrumman.FMPS-Calculator.App",
-		"Bundle `ID` of the target app"))
 	env = append(env, NewVar("test-driver-bundle", "b", "bundled_drv", String,
 		"com.NorthropGrumman.FMPS-Test-Driver.App",
 		"Bundle `ID` of the WebDriverAgent service"))
-	env = append(env, NewVar("target-device", "d", "target_dest", String,
-		"id=00008101-0005499E010B001E",
-		"Target `UUID` of the device under test"))
+
 	// env = append(env, NewVar("wda-network", "n", "driver_name", String,
 	// 	"en0",
 	// 	"Start WebDriverAgent that is reachable via host network `interface`"))
 	env = append(env, NewVar("wda-port", "t", "driver_port", Int,
 		8100,
 		"Connect to WebDriverAgent listening on TCP `port`"))
+
 	env = append(env, NewVar("listen-network", "n", "listen_name", String,
 		"en5",
 		"Network `interface` of the Appium REST server"))
 	env = append(env, NewVar("listen-port", "l", "listen_port", Int,
 		4723,
 		"TCP `port` of the Appium REST server"))
+
 	env = append(env, NewVar("xcodebuild-action", "x", "xcbuild_act", String,
 		"test",
 		"Run xcodebuild(1) `action` on the target app source code"))
+
 	env = append(env, NewVar("trace", "G", "trace_agent", Bool,
 		false,
 		"Print each command in the Appium init script before it is executed",
 		"(useful for debugging)"))
+
 	return env
 }
 

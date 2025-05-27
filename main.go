@@ -109,23 +109,36 @@ func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
 		func(v *config.Var) bool { v.UserDef = true; return true },
 	)
 
-	if cfg.Debug {
+	type setVar func(*config.Var)
+
+	handleDefault := func(flag string, handle setVar) {
 		i, found := slices.BinarySearchFunc(
-			cfg.Env, &config.Var{Flag: "build-config"}, config.OrderByFlag,
+			cfg.Env, &config.Var{Flag: flag}, config.OrderByFlag,
 		)
 		if found && !cfg.Env[i].UserDef {
-			cfg.Env[i].Value = "Debug"
+			handle(cfg.Env[i])
 		}
-		i, found = slices.BinarySearchFunc(
-			cfg.Env, &config.Var{Flag: "target-app-bundle"}, config.OrderByFlag,
-		)
-		if found && !cfg.Env[i].UserDef {
-			id := strings.Split(cfg.Env[i].String(), ".")
+	}
+	reset := func(str string) setVar {
+		return func(env *config.Var) {
+			env.Set(str)
+		}
+	}
+	setTail := func(str string) setVar {
+		return func(env *config.Var) {
+			id := strings.Split(env.String(), ".")
 			if len(id) > 0 {
-				id[len(id)-1] = "Debug"
+				id[len(id)-1] = str
 			}
-			cfg.Env[i].Set(strings.Join(id, "."))
+			env.Set(strings.Join(id, "."))
 		}
+	}
+
+	if cfg.Debug {
+		handleDefault("target-app-config", reset("Debug"))
+		handleDefault("test-driver-config", reset("Debug"))
+		handleDefault("target-app-bundle", setTail("Debug"))
+		handleDefault("test-driver-bundle", setTail("Debug"))
 	}
 
 	// We now need to override any configuration parameters
