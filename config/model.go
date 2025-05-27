@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -26,20 +25,20 @@ type Model struct {
 
 func (m *Model) Init(cmd *command.Model) error {
 	m.Cmd = cmd
-	m.Env = DefaultEnv().Sort(OrderByFlag)
+	m.Env = DefaultEnv() //.Sort(OrderByFlag)
 	m.EnvQuote = DefaultEnvQuote
 	return nil
 }
 
-func (m *Model) ApplyToFlags(visit func(func(f *flag.Flag)), apply func(*Var) bool) bool {
+func (m *Model) ApplyToFlags(visit func(func(*flag.Flag)), apply func(*Var) bool) bool {
 	result := false
 	visit(
 		func(f *flag.Flag) {
-			i, found := slices.BinarySearchFunc(
-				m.Env, &Var{Flag: f.Name}, OrderByFlag,
-			)
+			ptr, found := m.Env.Get(func(v *Var) bool {
+				return v.Flag == f.Name || v.PFlag == f.Name
+			})
 			if found {
-				result = apply(m.Env[i]) || result
+				result = apply(ptr) || result
 			}
 		})
 	return result

@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"slices"
 	"strings"
 
 	"github.com/muesli/reflow/indent"
@@ -27,21 +26,35 @@ func DefaultEnv() Env {
 		"Specify the deployment target iOS/iPadOS `version`",
 		"(build setting: IPHONEOS_DEPLOYMENT_TARGET)"))
 
+	env = append(env, NewVar("target-device", "d", "target_dest", String,
+		"id=00008101-0005499E010B001E",
+		"Target `UUID` of the device under test"))
+
+	env = append(env, NewVar("listen-network", "n", "listen_name", String,
+		"en5",
+		"Network `interface` of the Appium REST server"))
+	env = append(env, NewVar("listen-port", "l", "listen_port", Int,
+		4723,
+		"TCP `port` of the Appium REST server"))
+	env = append(env, NewVar("wda-port", "t", "driver_port", Int,
+		8100,
+		"Connect to WebDriverAgent listening on TCP `port`"))
+
 	env = append(env, NewVar("target-app-source", "p", "proj_source", String,
 		"",
 		"Directory `path` of the target app source code"))
 
-	env = append(env, NewVar("target-device", "d", "target_dest", String,
-		"id=00008101-0005499E010B001E",
-		"Target `UUID` of the device under test"))
+	env = append(env, NewVar("target-app-scheme", "s", "proj_scheme", String,
+		"FMPS Calculator",
+		"Build target app using `scheme` defined in Xcode project file"))
+	env = append(env, NewVar("xcodebuild-action", "x", "xcbuild_act", String,
+		"test",
+		"Run xcodebuild(1) `action` on the target app source code"))
 
 	env = append(env, NewVar("target-app-config", "c", "proj_config", String,
 		// "Debug",
 		"Release",
 		"Build target app using `config` from the selected scheme defined in Xcode project file"))
-	env = append(env, NewVar("target-app-scheme", "s", "proj_scheme", String,
-		"FMPS Calculator",
-		"Build target app using `scheme` defined in Xcode project file"))
 	env = append(env, NewVar("target-app-bundle", "a", "bundled_app", String,
 		// "com.NorthropGrumman.FMPS-Calculator.Debug", // set with --debug-config (-g)
 		"com.NorthropGrumman.FMPS-Calculator.App",
@@ -50,30 +63,9 @@ func DefaultEnv() Env {
 	env = append(env, NewVar("test-driver-config", "C", "test_config", String,
 		"Release",
 		"Build test driver using `config` from the selected scheme defined in Xcode project file"))
-	env = append(env, NewVar("test-driver-scheme", "S", "test_scheme", String,
-		"FMPS Calculator",
-		"Build test driver using `scheme` defined in Xcode project file"))
 	env = append(env, NewVar("test-driver-bundle", "b", "bundled_drv", String,
 		"com.NorthropGrumman.FMPS-Test-Driver.App",
 		"Bundle `ID` of the WebDriverAgent service"))
-
-	// env = append(env, NewVar("wda-network", "n", "driver_name", String,
-	// 	"en0",
-	// 	"Start WebDriverAgent that is reachable via host network `interface`"))
-	env = append(env, NewVar("wda-port", "t", "driver_port", Int,
-		8100,
-		"Connect to WebDriverAgent listening on TCP `port`"))
-
-	env = append(env, NewVar("listen-network", "n", "listen_name", String,
-		"en5",
-		"Network `interface` of the Appium REST server"))
-	env = append(env, NewVar("listen-port", "l", "listen_port", Int,
-		4723,
-		"TCP `port` of the Appium REST server"))
-
-	env = append(env, NewVar("xcodebuild-action", "x", "xcbuild_act", String,
-		"test",
-		"Run xcodebuild(1) `action` on the target app source code"))
 
 	env = append(env, NewVar("trace", "G", "trace_agent", Bool,
 		false,
@@ -112,15 +104,6 @@ func (e Env) Override(orphan, zero bool) Env {
 			}
 		}
 	}
-	return e
-}
-
-func OrderByFlag(a, b *Var) int {
-	return strings.Compare(a.Flag, b.Flag)
-}
-
-func (e Env) Sort(o Order) Env {
-	slices.SortStableFunc(e, o)
 	return e
 }
 

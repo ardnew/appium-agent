@@ -9,8 +9,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/ardnew/appium-agent/status"
 	"github.com/muesli/reflow/indent"
+
+	"github.com/ardnew/appium-agent/status"
 )
 
 type Var struct {

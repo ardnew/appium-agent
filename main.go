@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	flag "github.com/spf13/pflag"
@@ -20,7 +19,7 @@ import (
 	"github.com/ardnew/appium-agent/status"
 )
 
-var Version = "0.2.0"
+var Version = "0.3.0"
 
 func main() {
 	var (
@@ -101,7 +100,7 @@ func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
 	// This is important because we need to know which variables to override
 	// with values inherited from the environment below
 	//  (user-defined command-line flags take precedence).
-	//
+
 	// Here, we override all configuration parameters
 	// that were defined via command-line flags
 	//  (and mark them accordingly with .UserDef = true).
@@ -109,22 +108,28 @@ func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
 		func(v *config.Var) bool { v.UserDef = true; return true },
 	)
 
-	type setVar func(*config.Var)
+	// Any operation that modifies flags based on a given command-line flag
+	// MUST set the UserDef flag to true on the given flag
+	// AND all collateral flags that were modified.
+	type modVar func(*config.Var)
 
-	handleDefault := func(flag string, handle setVar) {
-		i, found := slices.BinarySearchFunc(
-			cfg.Env, &config.Var{Flag: flag}, config.OrderByFlag,
-		)
-		if found && !cfg.Env[i].UserDef {
-			handle(cfg.Env[i])
+	modDefault := func(flag string, mod modVar) {
+		ptr, found := cfg.Env.Get(func(v *config.Var) bool {
+			return v.Flag == flag || v.PFlag == flag
+		})
+		if found && !ptr.UserDef {
+			fmt.Println("found = ", ptr.Flag, "=", ptr.String())
+			mod(ptr)
+			ptr.UserDef = true // mark as user-defined
+			fmt.Println("found = ", ptr.Flag, "=", ptr.String())
 		}
 	}
-	reset := func(str string) setVar {
+	reset := func(str string) modVar {
 		return func(env *config.Var) {
 			env.Set(str)
 		}
 	}
-	setTail := func(str string) setVar {
+	setTail := func(str string) modVar {
 		return func(env *config.Var) {
 			id := strings.Split(env.String(), ".")
 			if len(id) > 0 {
@@ -135,11 +140,13 @@ func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
 	}
 
 	if cfg.Debug {
-		handleDefault("target-app-config", reset("Debug"))
-		handleDefault("test-driver-config", reset("Debug"))
-		handleDefault("target-app-bundle", setTail("Debug"))
-		handleDefault("test-driver-bundle", setTail("Debug"))
+		modDefault("target-app-config", reset("Debug"))
+		modDefault("test-driver-config", reset("Debug"))
+		modDefault("target-app-bundle", setTail("Debug"))
+		modDefault("test-driver-bundle", setTail("Debug"))
 	}
+
+	fmt.Println(cfg.Env)
 
 	// We now need to override any configuration parameters
 	// found in the environment that were not already set via command-line flags.
