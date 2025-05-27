@@ -118,10 +118,8 @@ func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
 			return v.Flag == flag || v.PFlag == flag
 		})
 		if found && !ptr.UserDef {
-			fmt.Println("found = ", ptr.Flag, "=", ptr.String())
 			mod(ptr)
 			ptr.UserDef = true // mark as user-defined
-			fmt.Println("found = ", ptr.Flag, "=", ptr.String())
 		}
 	}
 	reset := func(str string) modVar {
