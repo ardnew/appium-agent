@@ -19,7 +19,7 @@ import (
 	"github.com/ardnew/appium-agent/status"
 )
 
-var Version = "0.3.0"
+var Version = "0.3.1"
 
 func main() {
 	var (
@@ -143,8 +143,6 @@ func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
 		modDefault("target-app-bundle", setTail("Debug"))
 		modDefault("test-driver-bundle", setTail("Debug"))
 	}
-
-	fmt.Println(cfg.Env)
 
 	// We now need to override any configuration parameters
 	// found in the environment that were not already set via command-line flags.
