@@ -5,6 +5,7 @@ import "path/filepath"
 const (
 	AppiumdConfigIdent = "appium_config_env"
 	RestartAppiumIdent = "appium_restart"
+	LLDBManagedIdent   = "lldb_managed"
 )
 
 const (

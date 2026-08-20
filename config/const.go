@@ -12,6 +12,11 @@ const (
 )
 
 const (
+	DefaultKeychainIdent = "FSDS_KEYCHAIN_NAME"
+	DefaultPasswordIdent = "FSDS_KEYCHAIN_PASS"
+)
+
+const (
 	// The output is separated into 2 vertical regions
 	// that separate the syntax placeholder and the usage description:
 	//   (Note this may not align correctly in some editors)

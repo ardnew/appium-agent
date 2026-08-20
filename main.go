@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -19,7 +20,7 @@ import (
 	"github.com/ardnew/appium-agent/status"
 )
 
-var Version = "0.3.1"
+var Version = "0.6.0"
 
 func main() {
 	var (
@@ -47,6 +48,9 @@ func main() {
 				}
 				if cmd.SkipBuild {
 					exe.Env = append(exe.Env, fmt.Sprintf("%s=%s", command.RestartAppiumIdent, "true"))
+				}
+				if cmd.LLDBManaged {
+					exe.Env = append(exe.Env, fmt.Sprintf("%s=%s", command.LLDBManagedIdent, "true"))
 				}
 				if cmd.ForceRestart {
 					if err = command.KillAll(exe); err != nil {
@@ -140,13 +144,21 @@ func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
 	if cfg.Debug {
 		modDefault("target-app-config", reset("Debug"))
 		modDefault("test-driver-config", reset("Debug"))
-		modDefault("target-app-bundle", setTail("Debug"))
-		modDefault("test-driver-bundle", setTail("Debug"))
+		modDefault("target-app-bundle", setTail("App"))
+		modDefault("test-driver-bundle", setTail("App"))
 	}
 
 	// We now need to override any configuration parameters
 	// found in the environment that were not already set via command-line flags.
 	cfg.Env = cfg.Env.Override(cfg.Orphan, cfg.Zero)
+
+	if cmd.RebootDevice {
+		ctx, cancel := context.WithTimeout(context.Background(), deviceRebootTimeout)
+		defer cancel()
+		if err = rebootTargetDevice(ctx, cfg, cmd, modifyConfig, os.Stdout); err != nil {
+			return "", fmt.Errorf("reboot target device: %w", err)
+		}
+	}
 
 	if *dryRun {
 		// Print configuration and launch command to stdout, then exit.
@@ -198,8 +210,13 @@ func makeFlagSet(
 		"Kill all running Appium services before starting")
 	fset.BoolVarP(&cmd.SkipBuild, "restart-appium", "r", cmd.SkipBuild,
 		"Restart Appium without building the target app or test driver")
+	fset.BoolVarP(&cmd.RebootDevice, "reboot-device", "R", cmd.RebootDevice,
+		"Reboot the target iOS device and wait for its USB tunnel to reconnect")
 	fset.BoolVarP(&cfg.Debug, "debug-config", "g", false,
 		"Use the target debug configuration by default")
+	fset.BoolVarP(&cmd.LLDBManaged, "lldb-managed", "M", false,
+		"Wrap the test-driver launch in an LLDB watcher that breaks on "+
+			"uncaught Objective-C/C++ exceptions before the app terminates")
 	fset.BoolVarP(overwrite, "overwrite-config", "w", false,
 		"Write Appium configuration to file")
 	fset.BoolVarP(dryRun, "dryrun", "y", false,

@@ -72,6 +72,14 @@ func DefaultEnv() Env {
 		"Print each command in the Appium init script before it is executed",
 		"(useful for debugging)"))
 
+	env = append(env, NewVar("keychain", "K", "sec_kc_name", String,
+		os.Getenv(DefaultKeychainIdent),
+		"Export code signing certificate and private key from keychain `name`"))
+
+	env = append(env, NewVar("password", "P", "sec_kc_pass", String,
+		os.Getenv(DefaultPasswordIdent),
+		"Unlock keychain using literal password"))
+
 	return env
 }
 

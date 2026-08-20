@@ -14,6 +14,8 @@ type Model struct {
 	ScriptPath   string
 	ForceRestart bool
 	SkipBuild    bool
+	RebootDevice bool
+	LLDBManaged  bool
 }
 
 func (m *Model) Init() error {
