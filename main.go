@@ -20,7 +20,7 @@ import (
 	"github.com/ardnew/appium-agent/status"
 )
 
-var Version = "0.6.0"
+var Version = "0.6.1"
 
 func main() {
 	var (
@@ -40,6 +40,9 @@ func main() {
 		if err = initConfig(cfg, cmd); err == nil {
 			var tmpConfig string
 			if tmpConfig, err = parseFlags(cfg, cmd); err == nil {
+				if exitsAfterReboot(cmd) {
+					return
+				}
 				exe.Env = exe.Environ()
 				if tmpConfig != "" {
 					export := fmt.Sprintf("%s=%s", command.AppiumdConfigIdent, tmpConfig)
@@ -158,6 +161,7 @@ func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
 		if err = rebootTargetDevice(ctx, cfg, cmd, modifyConfig, os.Stdout); err != nil {
 			return "", fmt.Errorf("reboot target device: %w", err)
 		}
+		return "", nil
 	}
 
 	if *dryRun {
@@ -193,6 +197,10 @@ func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
 	// but is NOT saving the configuration to the default config file.
 	// This allows for one-off test runs without committing anything to disk.
 	return tmpConfig, nil
+}
+
+func exitsAfterReboot(cmd *command.Model) bool {
+	return cmd.RebootDevice
 }
 
 func makeFlagSet(
