@@ -23,7 +23,6 @@ func TestIOSDeviceRebootAndWait(t *testing.T) {
 		nil,
 		[]byte(`[{"udid":"device-1"}]`),
 		[]byte(`[]`),
-		[]byte(`{"deviceList":[{"Udid":"device-1"}]}`),
 		[]byte(`[]`),
 		[]byte(`[{"udid":"another-device"},{"udid":"device-1"}]`),
 	}
@@ -37,6 +36,11 @@ func TestIOSDeviceRebootAndWait(t *testing.T) {
 	var out bytes.Buffer
 	device := iosDevice{
 		run: run,
+		listen: listenEvents(
+			`{"MessageType":"Attached","DeviceID":18,"Properties":{"SerialNumber":"device-1"}}`,
+			`{"MessageType":"Detached","DeviceID":18,"Properties":{}}`,
+			`{"MessageType":"Attached","DeviceID":19,"Properties":{"SerialNumber":"device-1"}}`,
+		),
 		reload: func(_ context.Context, _ io.Writer) error {
 			t.Fatal("reload called after automatic tunnel reconnection")
 			return nil
@@ -53,7 +57,6 @@ func TestIOSDeviceRebootAndWait(t *testing.T) {
 		{"reboot", "--udid=device-1"},
 		{"tunnel", "ls", "--udid=device-1"},
 		{"tunnel", "ls", "--udid=device-1"},
-		{"list", "--details"},
 		{"tunnel", "ls", "--udid=device-1"},
 		{"tunnel", "ls", "--udid=device-1"},
 	}
@@ -92,6 +95,11 @@ func TestIOSDeviceReloadsTunnelAfterAutomaticStartTimeout(t *testing.T) {
 	var out bytes.Buffer
 	device := iosDevice{
 		run: run,
+		listen: listenEvents(
+			`{"MessageType":"Attached","DeviceID":18,"Properties":{"SerialNumber":"device-1"}}`,
+			`{"MessageType":"Detached","DeviceID":18,"Properties":{}}`,
+			`{"MessageType":"Attached","DeviceID":19,"Properties":{"SerialNumber":"device-1"}}`,
+		),
 		reload: func(_ context.Context, _ io.Writer) error {
 			reloadCalls++
 			return nil
@@ -119,6 +127,9 @@ func TestIOSDeviceRebootFailureStopsBeforeTunnelWait(t *testing.T) {
 			callCount++
 			return nil, wantErr
 		},
+		listen: listenEvents(
+			`{"MessageType":"Attached","DeviceID":18,"Properties":{"SerialNumber":"device-1"}}`,
+		),
 		out: new(bytes.Buffer),
 	}
 
@@ -128,6 +139,89 @@ func TestIOSDeviceRebootFailureStopsBeforeTunnelWait(t *testing.T) {
 	}
 	if callCount != 1 {
 		t.Fatalf("command calls = %d, want 1", callCount)
+	}
+}
+
+func TestIOSDeviceCycleUSBAndWait(t *testing.T) {
+	var selector string
+	var out bytes.Buffer
+	device := iosDevice{
+		run: func(_ context.Context, arg ...string) ([]byte, error) {
+			if !reflect.DeepEqual(arg, []string{"tunnel", "ls", "--udid=00008101-0005499E010B001E"}) {
+				return nil, fmt.Errorf("unexpected ios command: %v", arg)
+			}
+			return []byte(`[{"udid":"00008101-0005499E010B001E"}]`), nil
+		},
+		listen: listenEvents(
+			`{"MessageType":"Attached","DeviceID":18,"Properties":{"SerialNumber":"00008101-0005499E010B001E"}}`,
+			`{"MessageType":"Detached","DeviceID":18,"Properties":{}}`,
+			`{"MessageType":"Attached","DeviceID":19,"Properties":{"SerialNumber":"00008101-0005499E010B001E"}}`,
+		),
+		cycleUSB: func(_ context.Context, got string, _ io.Writer) error {
+			selector = got
+			return nil
+		},
+		reload: func(_ context.Context, _ io.Writer) error {
+			t.Fatal("reload called after automatic tunnel reconnection")
+			return nil
+		},
+		out: &out,
+	}
+	if err := device.cycleUSBAndWait(context.Background(), "00008101-0005499E010B001E"); err != nil {
+		t.Fatalf("cycleUSBAndWait() error = %v", err)
+	}
+	if selector != "000081010005499E010B001E" {
+		t.Fatalf("uhubctl selector = %q, want hyphen-free UDID", selector)
+	}
+	if !strings.Contains(out.String(), "Device tunnel reconnected.") {
+		t.Fatalf("output = %q, want tunnel reconnect confirmation", out.String())
+	}
+}
+
+func TestUhubctlSelectorRejectsUnsupportedCharacters(t *testing.T) {
+	if _, err := uhubctlSelector("device_1"); err == nil {
+		t.Fatal("uhubctlSelector() accepted a non-alphanumeric character")
+	}
+}
+
+func TestWaitForDeviceReconnectRequiresDetachBeforeAttach(t *testing.T) {
+	device := iosDevice{listen: listenEvents(
+		`{"MessageType":"Attached","DeviceID":18,"Properties":{"SerialNumber":"device-1"}}`,
+		`{"MessageType":"Detached","DeviceID":18,"Properties":{}}`,
+		`{"MessageType":"Attached","DeviceID":19,"Properties":{"SerialNumber":"another-device"}}`,
+		`{"MessageType":"Attached","DeviceID":20,"Properties":{"SerialNumber":"device-1"}}`,
+	)}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	events, listenErrors, err := device.deviceEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deviceID, err := waitForDeviceAttached(ctx, events, listenErrors, "device-1")
+	if err != nil {
+		t.Fatalf("waitForDeviceAttached() error = %v", err)
+	}
+	if err = waitForDeviceReconnect(ctx, events, listenErrors, "device-1", deviceID); err != nil {
+		t.Fatalf("waitForDeviceReconnect() error = %v", err)
+	}
+}
+
+func TestDeviceEventsRejectsInvalidJSON(t *testing.T) {
+	device := iosDevice{listen: listenEvents(`not JSON`)}
+	events, listenErrors, err := device.deviceEvents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+	if err = <-listenErrors; err == nil || !strings.Contains(err.Error(), "decode ios listen event") {
+		t.Fatalf("deviceEvents() error = %v, want decode error", err)
+	}
+}
+
+func listenEvents(events ...string) iosListenCommand {
+	return func(context.Context) (io.ReadCloser, func() error, error) {
+		return io.NopCloser(strings.NewReader(strings.Join(events, "\n") + "\n")), func() error { return nil }, nil
 	}
 }
 

@@ -7,10 +7,13 @@ import (
 )
 
 func TestRebootDeviceExitsBeforeAppiumLaunch(t *testing.T) {
-	if !exitsAfterReboot(&command.Model{RebootDevice: true}) {
+	if !exitsAfterDeviceOperation(&command.Model{RebootDevice: true}) {
 		t.Fatal("reboot-device command should exit before Appium configuration validation and launch")
 	}
-	if exitsAfterReboot(new(command.Model)) {
+	if !exitsAfterDeviceOperation(&command.Model{CycleUSB: true}) {
+		t.Fatal("cycle-usb command should exit before Appium configuration validation and launch")
+	}
+	if exitsAfterDeviceOperation(new(command.Model)) {
 		t.Fatal("ordinary Appium command should continue to configuration validation and launch")
 	}
 }

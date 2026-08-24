@@ -15,6 +15,7 @@ type Model struct {
 	ForceRestart bool
 	SkipBuild    bool
 	RebootDevice bool
+	CycleUSB     bool
 	LLDBManaged  bool
 }
 

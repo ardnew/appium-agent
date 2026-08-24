@@ -27,11 +27,15 @@ const (
 )
 
 type iosCommand func(context.Context, ...string) ([]byte, error)
+type iosListenCommand func(context.Context) (io.ReadCloser, func() error, error)
 type tunnelReloader func(context.Context, io.Writer) error
+type usbPowerCycler func(context.Context, string, io.Writer) error
 
 type iosDevice struct {
 	run                   iosCommand
+	listen                iosListenCommand
 	reload                tunnelReloader
+	cycleUSB              usbPowerCycler
 	out                   io.Writer
 	pollInterval          time.Duration
 	automaticStartTimeout time.Duration
@@ -49,8 +53,34 @@ func newIOSDevice(out io.Writer) iosDevice {
 			}
 			return output, err
 		},
+		listen: func(ctx context.Context) (io.ReadCloser, func() error, error) {
+			cmd := exec.CommandContext(ctx, "ios", "listen")
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				return nil, nil, err
+			}
+			if err = cmd.Start(); err != nil {
+				_ = stdout.Close()
+				return nil, nil, err
+			}
+			return stdout, func() error {
+				err := cmd.Wait()
+				if message := strings.TrimSpace(stderr.String()); err != nil && message != "" {
+					return fmt.Errorf("%w: %s", err, message)
+				}
+				return err
+			}, nil
+		},
 		reload: func(ctx context.Context, out io.Writer) error {
 			cmd := exec.CommandContext(ctx, tunnelReloadCommand)
+			cmd.Stdout = out
+			cmd.Stderr = out
+			return cmd.Run()
+		},
+		cycleUSB: func(ctx context.Context, udid string, out io.Writer) error {
+			cmd := exec.CommandContext(ctx, "uhubctl", "-s", udid, "-a", "cycle")
 			cmd.Stdout = out
 			cmd.Stderr = out
 			return cmd.Run()
@@ -73,6 +103,16 @@ func rebootTargetDevice(
 		return err
 	}
 	return newIOSDevice(out).rebootAndWait(ctx, udid)
+}
+
+func cycleTargetUSB(
+	ctx context.Context, cfg *config.Model, cmd *command.Model, generatedConfig bool, out io.Writer,
+) error {
+	udid, err := targetDeviceUDID(cfg, cmd, generatedConfig)
+	if err != nil {
+		return err
+	}
+	return newIOSDevice(out).cycleUSBAndWait(ctx, udid)
 }
 
 func targetDeviceUDID(
@@ -215,8 +255,20 @@ func parseTargetAssignment(raw string) (string, error) {
 }
 
 func (d iosDevice) rebootAndWait(ctx context.Context, udid string) error {
+	listenCtx, stopListening := context.WithCancel(ctx)
+	events, listenErrors, err := d.deviceEvents(listenCtx)
+	if err != nil {
+		stopListening()
+		return fmt.Errorf("start ios listen: %w", err)
+	}
+	defer stopListening()
+	deviceID, err := waitForDeviceAttached(ctx, events, listenErrors, udid)
+	if err != nil {
+		return fmt.Errorf("wait for ios listen readiness: %w", err)
+	}
+
 	fmt.Fprintf(d.out, "Rebooting iOS device %s...\n", udid)
-	if _, err := d.run(ctx, "reboot", "--udid="+udid); err != nil {
+	if _, err = d.run(ctx, "reboot", "--udid="+udid); err != nil {
 		return fmt.Errorf("ios reboot: %w", err)
 	}
 
@@ -226,11 +278,15 @@ func (d iosDevice) rebootAndWait(ctx context.Context, udid string) error {
 	}
 
 	fmt.Fprintln(d.out, "Waiting for the device to reconnect over USB...")
-	if err := d.waitForDevice(ctx, udid); err != nil {
+	if err = waitForDeviceReconnect(ctx, events, listenErrors, udid, deviceID); err != nil {
 		return fmt.Errorf("wait for device USB connection: %w", err)
 	}
 
 	fmt.Fprintln(d.out, "Waiting for the device tunnel to reconnect...")
+	return d.waitForTunnelReconnect(ctx, udid)
+}
+
+func (d iosDevice) waitForTunnelReconnect(ctx context.Context, udid string) error {
 	automaticTimeout := d.automaticStartTimeout
 	if automaticTimeout <= 0 {
 		automaticTimeout = automaticTunnelStartDelay
@@ -259,27 +315,163 @@ func (d iosDevice) rebootAndWait(ctx context.Context, udid string) error {
 	return nil
 }
 
-func (d iosDevice) waitForDevice(ctx context.Context, udid string) error {
-	interval := d.pollInterval
-	if interval <= 0 {
-		interval = tunnelPollInterval
+func (d iosDevice) cycleUSBAndWait(ctx context.Context, udid string) error {
+	listenCtx, stopListening := context.WithCancel(ctx)
+	events, listenErrors, err := d.deviceEvents(listenCtx)
+	if err != nil {
+		stopListening()
+		return fmt.Errorf("start ios listen: %w", err)
+	}
+	defer stopListening()
+	deviceID, err := waitForDeviceAttached(ctx, events, listenErrors, udid)
+	if err != nil {
+		return fmt.Errorf("wait for ios listen readiness: %w", err)
 	}
 
-	for {
-		available, err := d.deviceAvailable(ctx, udid)
-		if err == nil && available {
-			return nil
-		}
+	selector, err := uhubctlSelector(udid)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(d.out, "Cycling USB port power for iOS device %s...\n", udid)
+	if err = d.cycleUSB(ctx, selector, d.out); err != nil {
+		return fmt.Errorf("uhubctl USB power cycle: %w", err)
+	}
 
-		timer := time.NewTimer(interval)
+	fmt.Fprintln(d.out, "Waiting for the device to re-enumerate over USB...")
+	if err = waitForDeviceReconnect(ctx, events, listenErrors, udid, deviceID); err != nil {
+		return fmt.Errorf("wait for device USB re-enumeration: %w", err)
+	}
+	fmt.Fprintln(d.out, "Device re-enumerated over USB.")
+
+	fmt.Fprintln(d.out, "Waiting for the device tunnel to reconnect...")
+	return d.waitForTunnelReconnect(ctx, udid)
+}
+
+func uhubctlSelector(udid string) (string, error) {
+	selector := strings.ReplaceAll(udid, "-", "")
+	if selector == "" {
+		return "", errors.New("target device UDID is empty")
+	}
+	for _, char := range selector {
+		if !(char >= 'a' && char <= 'z') && !(char >= 'A' && char <= 'Z') && !(char >= '0' && char <= '9') {
+			return "", fmt.Errorf("target device UDID %q contains characters unsupported by uhubctl", udid)
+		}
+	}
+	return selector, nil
+}
+
+type iosDeviceEvent struct {
+	MessageType string `json:"MessageType"`
+	DeviceID    int    `json:"DeviceID"`
+	Properties  struct {
+		SerialNumber string `json:"SerialNumber"`
+	} `json:"Properties"`
+}
+
+func (d iosDevice) deviceEvents(ctx context.Context) (<-chan iosDeviceEvent, <-chan error, error) {
+	if d.listen == nil {
+		return nil, nil, errors.New("ios listen command is not configured")
+	}
+	stdout, wait, err := d.listen(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	events := make(chan iosDeviceEvent)
+	listenErrors := make(chan error, 1)
+	processDone := make(chan error, 1)
+	go func() {
+		processDone <- wait()
+	}()
+	go func() {
+		defer close(events)
+		defer close(listenErrors)
+		defer stdout.Close()
+
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			var event iosDeviceEvent
+			if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+				listenErrors <- fmt.Errorf("decode ios listen event: %w", err)
+				return
+			}
+			select {
+			case events <- event:
+			case <-ctx.Done():
+				return
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			listenErrors <- fmt.Errorf("read ios listen output: %w", err)
+			return
+		}
+		if err := <-processDone; err != nil && ctx.Err() == nil {
+			listenErrors <- fmt.Errorf("ios listen: %w", err)
+		} else if ctx.Err() == nil {
+			listenErrors <- errors.New("ios listen exited unexpectedly")
+		}
+	}()
+	return events, listenErrors, nil
+}
+
+func waitForDeviceReconnect(
+	ctx context.Context, events <-chan iosDeviceEvent, listenErrors <-chan error, udid string, deviceID int,
+) error {
+	deviceIDs := map[int]string{deviceID: udid}
+	detached := false
+	for {
 		select {
 		case <-ctx.Done():
-			timer.Stop()
-			if err != nil {
-				return fmt.Errorf("%w (last device query: %v)", ctx.Err(), err)
-			}
 			return ctx.Err()
-		case <-timer.C:
+		case err, ok := <-listenErrors:
+			if ok && err != nil {
+				return err
+			}
+			listenErrors = nil
+		case event, ok := <-events:
+			if !ok {
+				events = nil
+				continue
+			}
+			switch event.MessageType {
+			case "Attached":
+				deviceIDs[event.DeviceID] = event.Properties.SerialNumber
+				if detached && event.Properties.SerialNumber == udid {
+					return nil
+				}
+			case "Detached":
+				serial := event.Properties.SerialNumber
+				if serial == "" {
+					serial = deviceIDs[event.DeviceID]
+				}
+				if serial == udid {
+					detached = true
+				}
+				delete(deviceIDs, event.DeviceID)
+			}
+		}
+	}
+}
+
+func waitForDeviceAttached(
+	ctx context.Context, events <-chan iosDeviceEvent, listenErrors <-chan error, udid string,
+) (int, error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case err, ok := <-listenErrors:
+			if ok && err != nil {
+				return 0, err
+			}
+			listenErrors = nil
+		case event, ok := <-events:
+			if !ok {
+				events = nil
+				continue
+			}
+			if event.MessageType == "Attached" && event.Properties.SerialNumber == udid {
+				return event.DeviceID, nil
+			}
 		}
 	}
 }
@@ -323,28 +515,6 @@ func (d iosDevice) tunnelAvailable(ctx context.Context, udid string) (bool, erro
 	}
 	for _, tunnel := range tunnels {
 		if tunnel.UDID == udid {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func (d iosDevice) deviceAvailable(ctx context.Context, udid string) (bool, error) {
-	out, err := d.run(ctx, "list", "--details")
-	if err != nil {
-		return false, err
-	}
-
-	var devices struct {
-		DeviceList []struct {
-			UDID string `json:"Udid"`
-		} `json:"deviceList"`
-	}
-	if err = json.Unmarshal(out, &devices); err != nil {
-		return false, fmt.Errorf("decode ios list output: %w", err)
-	}
-	for _, device := range devices.DeviceList {
-		if device.UDID == udid {
 			return true, nil
 		}
 	}

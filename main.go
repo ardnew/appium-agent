@@ -20,7 +20,7 @@ import (
 	"github.com/ardnew/appium-agent/status"
 )
 
-var Version = "0.6.1"
+var Version = "0.7.0"
 
 func main() {
 	var (
@@ -40,7 +40,7 @@ func main() {
 		if err = initConfig(cfg, cmd); err == nil {
 			var tmpConfig string
 			if tmpConfig, err = parseFlags(cfg, cmd); err == nil {
-				if exitsAfterReboot(cmd) {
+				if exitsAfterDeviceOperation(cmd) {
 					return
 				}
 				exe.Env = exe.Environ()
@@ -163,6 +163,14 @@ func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
 		}
 		return "", nil
 	}
+	if cmd.CycleUSB {
+		ctx, cancel := context.WithTimeout(context.Background(), deviceRebootTimeout)
+		defer cancel()
+		if err = cycleTargetUSB(ctx, cfg, cmd, modifyConfig, os.Stdout); err != nil {
+			return "", fmt.Errorf("cycle target device USB power: %w", err)
+		}
+		return "", nil
+	}
 
 	if *dryRun {
 		// Print configuration and launch command to stdout, then exit.
@@ -199,8 +207,8 @@ func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
 	return tmpConfig, nil
 }
 
-func exitsAfterReboot(cmd *command.Model) bool {
-	return cmd.RebootDevice
+func exitsAfterDeviceOperation(cmd *command.Model) bool {
+	return cmd.RebootDevice || cmd.CycleUSB
 }
 
 func makeFlagSet(
@@ -220,6 +228,8 @@ func makeFlagSet(
 		"Restart Appium without building the target app or test driver")
 	fset.BoolVarP(&cmd.RebootDevice, "reboot-device", "R", cmd.RebootDevice,
 		"Reboot the target iOS device and wait for its USB tunnel to reconnect")
+	fset.BoolVarP(&cmd.CycleUSB, "cycle-usb", "U", cmd.CycleUSB,
+		"Cycle power to the target iOS device USB port and wait for re-enumeration")
 	fset.BoolVarP(&cfg.Debug, "debug-config", "g", false,
 		"Use the target debug configuration by default")
 	fset.BoolVarP(&cmd.LLDBManaged, "lldb-managed", "M", false,
