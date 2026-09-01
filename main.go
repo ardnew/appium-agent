@@ -49,6 +49,12 @@ func main() {
 					fmt.Printf("NOTE: using temporary Appium configuration:\n\t%s\n", export)
 					exe.Env = append(exe.Env, export)
 				}
+				mode, modeErr := cmd.Mode()
+				if modeErr != nil {
+					err = modeErr
+					return
+				}
+				exe.Env = append(exe.Env, fmt.Sprintf("%s=%s", command.AppiumModeIdent, mode))
 				if cmd.SkipBuild {
 					exe.Env = append(exe.Env, fmt.Sprintf("%s=%s", command.RestartAppiumIdent, "true"))
 				}
@@ -94,6 +100,10 @@ func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
 			os.Exit(0)
 		}
 		return "", fmt.Errorf("parse command line flags: %w", err)
+	}
+	mode, err := cmd.Mode()
+	if err != nil {
+		return "", err
 	}
 
 	// Determine if we are running with modified configuration.
@@ -154,6 +164,29 @@ func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
 	// We now need to override any configuration parameters
 	// found in the environment that were not already set via command-line flags.
 	cfg.Env = cfg.Env.Override(cfg.Orphan, cfg.Zero)
+	if mode == command.ModeTestDriverOnly || mode == command.ModeRelaunchTestDriver || mode == command.ModeActivateIPA {
+		if source, sourceErr := config.LookupSource(); sourceErr == nil {
+			if loadErr := cfg.Env.OverrideFile(source); loadErr != nil {
+				return "", fmt.Errorf("load current Appium configuration: %w", loadErr)
+			}
+		}
+	}
+	if mode == command.ModeActivateIPA {
+		metadata, inspectErr := inspectIPA(cmd.ActivateIPA)
+		if inspectErr != nil {
+			return "", fmt.Errorf("validate target IPA: %w", inspectErr)
+		}
+		if err = cfg.Set("target_app_ipa", cmd.ActivateIPA); err != nil {
+			return "", fmt.Errorf("set target IPA: %w", err)
+		}
+		if err = cfg.Set("bundled_app", metadata.BundleID); err != nil {
+			return "", fmt.Errorf("set target app bundle: %w", err)
+		}
+		modifyConfig = true
+	}
+	if mode == command.ModeTestDriverOnly || mode == command.ModeRelaunchTestDriver || mode == command.ModeActivateIPA {
+		*overwrite = true
+	}
 
 	if cmd.RebootDevice {
 		ctx, cancel := context.WithTimeout(context.Background(), deviceRebootTimeout)
@@ -180,7 +213,11 @@ func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
 		os.Exit(0)
 	}
 
-	if err = cfg.Validate(); err != nil {
+	optional := []string{"target_app_ipa"}
+	if mode == command.ModeActivateIPA {
+		optional = []string{"proj_source"}
+	}
+	if err = cfg.ValidateExcept(optional...); err != nil {
 		return "", fmt.Errorf("validate Appium configuration: %w", err)
 	}
 
@@ -235,6 +272,12 @@ func makeFlagSet(
 	fset.BoolVarP(&cmd.LLDBManaged, "lldb-managed", "M", false,
 		"Wrap the test-driver launch in an LLDB watcher that breaks on "+
 			"uncaught Objective-C/C++ exceptions before the app terminates")
+	fset.BoolVar(&cmd.TestDriverOnly, "test-driver-only", false,
+		"Build, install, and launch only FMPS Test Driver, then restart Appium")
+	fset.BoolVar(&cmd.RelaunchTestDriver, "relaunch-test-driver", false,
+		"Relaunch the previously installed FMPS Test Driver, then restart Appium")
+	fset.StringVar(&cmd.ActivateIPA, "activate-ipa", "",
+		"Validate and install a pre-built target app `IPA`, preserving the selected test driver")
 	fset.BoolVarP(overwrite, "overwrite-config", "w", false,
 		"Write Appium configuration to file")
 	fset.BoolVarP(dryRun, "dryrun", "y", false,
@@ -278,11 +321,16 @@ func install(cfg *config.Model, cmd *command.Model, tee bool, wTee ...io.Writer)
 			return fmt.Errorf("backup Appium configuration: %w", berr)
 		}
 	}
-	out, err := os.OpenFile(env, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644) //nolint:gomnd,mnd
+	out, err := os.CreateTemp(filepath.Dir(env), ".config.env-*")
 	if err != nil {
 		return fmt.Errorf("%w: %q: %w", status.ErrOpenFile, env, err)
 	}
-	defer out.Close()
+	tmp := out.Name()
+	defer os.Remove(tmp)
+	if err := out.Chmod(0o644); err != nil { //nolint:gomnd,mnd
+		_ = out.Close()
+		return fmt.Errorf("set Appium configuration permissions: %w", err)
+	}
 	var wAll io.Writer = out
 	if tee && len(wTee) > 0 {
 		a := make([]io.Writer, 0, len(wTee)+1)
@@ -290,7 +338,21 @@ func install(cfg *config.Model, cmd *command.Model, tee bool, wTee ...io.Writer)
 		a = append(a, wTee...)
 		wAll = io.MultiWriter(a...)
 	}
-	return writeConfig(wAll, cfg, cmd)
+	if err := writeConfig(wAll, cfg, cmd); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("sync Appium configuration: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close Appium configuration: %w", err)
+	}
+	if err := os.Rename(tmp, env); err != nil {
+		return fmt.Errorf("activate Appium configuration: %w", err)
+	}
+	return nil
 }
 
 func scratch(cfg *config.Model, cmd *command.Model, base string, tee bool, wTee ...io.Writer) (string, error) {

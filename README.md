@@ -84,3 +84,26 @@ When a new test event is requested, the `appiumd.zsh` launch agent reads this
 file — along with any command-line arguments defined in `appium.plist` — and 
 overwrites the corresponding values in the JSON configuration file.
 
+## Pre-built applications and explicit test-driver modes
+
+EMT may select a validated, retained IPA through its canonical
+`~/Library/Caches/emt/upload/app.ipa` symlink. The following appium-agent
+operations are public long-form contracts used by EMT:
+
+- `--activate-ipa PATH` validates the archive, derives its application bundle
+  identifier, atomically updates the generated configuration, installs the IPA,
+  and restarts Appium. An already-installed manifested FMPS Test Driver is
+  stopped and relaunched around installation; no driver is selected or
+  installed implicitly.
+- `--test-driver-only` builds for testing from `--target-app-source`, installs
+  only the generated FMPS Test Driver Runner, launches it with `ios runwda`, and
+  restarts Appium while preserving the selected target IPA.
+- `--relaunch-test-driver` verifies the selected source against the persisted
+  driver manifest, then relaunches that installed Runner without SVN, build, or
+  installation work.
+
+The driver manifest and provisioning lock are stored below
+`${FSDS_PREFIX}/var/run/appium`. These partial modes explicitly reload the
+current generated `config.env`; this is necessary because the EMT and Appium
+LaunchAgents invoke login shells that source `/opt/fsds/env.zsh`, and a
+long-running EMT process may otherwise retain older inherited values.

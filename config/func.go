@@ -90,10 +90,33 @@ func Backup(source, backup string) error {
 	// Don't attempt to backup or return an error
 	// if only one path (or neither) is provided.
 	if source != "" && backup != "" {
-		if err := os.Rename(source, backup); err != nil {
+		data, err := os.ReadFile(source)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
 			return fmt.Errorf(
-				"%w: backup: %q -> %q: %w", status.ErrWriteFile, source, backup, err,
+				"%w: read backup source: %q: %w", status.ErrWriteFile, source, err,
 			)
+		}
+		if err := os.MkdirAll(filepath.Dir(backup), 0o755); err != nil { //nolint:gomnd,mnd
+			return fmt.Errorf("%w: create backup directory: %q: %w", status.ErrWriteFile, backup, err)
+		}
+		tmp, err := os.CreateTemp(filepath.Dir(backup), ".config-backup-*")
+		if err != nil {
+			return fmt.Errorf("%w: create backup: %q: %w", status.ErrWriteFile, backup, err)
+		}
+		tmpPath := tmp.Name()
+		defer os.Remove(tmpPath)
+		if _, err := tmp.Write(data); err != nil {
+			_ = tmp.Close()
+			return fmt.Errorf("%w: write backup: %q: %w", status.ErrWriteFile, backup, err)
+		}
+		if err := tmp.Close(); err != nil {
+			return fmt.Errorf("%w: close backup: %q: %w", status.ErrWriteFile, backup, err)
+		}
+		if err := os.Rename(tmpPath, backup); err != nil {
+			return fmt.Errorf("%w: activate backup: %q: %w", status.ErrWriteFile, backup, err)
 		}
 	}
 	return nil

@@ -6,6 +6,15 @@ const (
 	AppiumdConfigIdent = "appium_config_env"
 	RestartAppiumIdent = "appium_restart"
 	LLDBManagedIdent   = "lldb_managed"
+	AppiumModeIdent    = "appium_mode"
+)
+
+const (
+	ModeFull               = "full"
+	ModeRestart            = "restart"
+	ModeTestDriverOnly     = "test-driver-only"
+	ModeRelaunchTestDriver = "relaunch-test-driver"
+	ModeActivateIPA        = "activate-ipa"
 )
 
 const (

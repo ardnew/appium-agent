@@ -9,14 +9,42 @@ import (
 )
 
 type Model struct {
-	ShellPath    string
-	ShellArgs    []string
-	ScriptPath   string
-	ForceRestart bool
-	SkipBuild    bool
-	RebootDevice bool
-	CycleUSB     bool
-	LLDBManaged  bool
+	ShellPath          string
+	ShellArgs          []string
+	ScriptPath         string
+	ForceRestart       bool
+	SkipBuild          bool
+	RebootDevice       bool
+	CycleUSB           bool
+	LLDBManaged        bool
+	TestDriverOnly     bool
+	RelaunchTestDriver bool
+	ActivateIPA        string
+}
+
+func (m Model) Mode() (string, error) {
+	selected := 0
+	mode := ModeFull
+	if m.SkipBuild {
+		selected++
+		mode = ModeRestart
+	}
+	if m.TestDriverOnly {
+		selected++
+		mode = ModeTestDriverOnly
+	}
+	if m.RelaunchTestDriver {
+		selected++
+		mode = ModeRelaunchTestDriver
+	}
+	if m.ActivateIPA != "" {
+		selected++
+		mode = ModeActivateIPA
+	}
+	if selected > 1 {
+		return "", fmt.Errorf("Appium operation flags are mutually exclusive")
+	}
+	return mode, nil
 }
 
 func (m *Model) Init() error {

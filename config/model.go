@@ -45,11 +45,34 @@ func (m *Model) ApplyToFlags(visit func(func(*flag.Flag)), apply func(*Var) bool
 }
 
 func (m *Model) Validate() error {
+	return m.ValidateExcept()
+}
+
+func (m *Model) ValidateExcept(optional ...string) error {
+	skip := make(map[string]bool, len(optional))
+	for _, ident := range optional {
+		skip[ident] = true
+	}
 	for _, val := range m.Env {
+		if skip[val.Ident] {
+			continue
+		}
 		if strings.TrimSpace(val.String()) == "" {
 			return fmt.Errorf("%w: %q", status.ErrIdentUndef, val.Ident)
 		}
 	}
+	return nil
+}
+
+func (m *Model) Set(ident, value string) error {
+	val, ok := m.Env.Get(func(v *Var) bool { return v.Ident == ident })
+	if !ok {
+		return fmt.Errorf("%w: %q", status.ErrIdentUndef, ident)
+	}
+	if err := val.Set(value); err != nil {
+		return err
+	}
+	val.UserDef = true
 	return nil
 }
 
@@ -115,8 +138,8 @@ func (m *Model) String() string {
 				case strings.HasPrefix(trimVal, "$(") && strings.HasSuffix(trimVal, ")"):
 					str.WriteString(trimVal) // Don't quote command substitution
 				default:
-					str.WriteRune(m.EnvQuote) // Quote everything else,
-					str.WriteString(fullVal)  //  and retain untrimmed values.
+					str.WriteRune(m.EnvQuote)                                  // Quote everything else,
+					str.WriteString(strings.ReplaceAll(fullVal, "'", "'\\''")) // retain values safely.
 					str.WriteRune(m.EnvQuote)
 				}
 			}

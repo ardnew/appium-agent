@@ -15,7 +15,7 @@ type Order func(a, b *Var) int
 
 func DefaultEnv() Env {
 	// Define the default environment variable / command-line flags.
-	env := make(Env, 0, 32)
+	env := make(Env, 0, 33)
 
 	env = append(env, NewVar("sdk-version", "k", "sdk_version", String,
 		"$( xcrun --sdk iphoneos --show-sdk-version )",
@@ -43,6 +43,9 @@ func DefaultEnv() Env {
 	env = append(env, NewVar("target-app-source", "p", "proj_source", String,
 		"",
 		"Directory `path` of the target app source code"))
+	env = append(env, NewVar("target-app-ipa", "", "target_app_ipa", String,
+		"",
+		"Canonical `path` of a pre-built target app IPA"))
 
 	env = append(env, NewVar("target-app-scheme", "s", "proj_scheme", String,
 		"FMPS Calculator",

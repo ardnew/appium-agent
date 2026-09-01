@@ -93,7 +93,14 @@ func (v *Var) Usage() string {
 		top.WriteRune(' ')
 	}
 
-	top.Write(v.syntax([]string{"-" + v.PFlag, "--" + v.Flag}, name, synlen-1))
+	flags := make([]string, 0, 2)
+	if v.PFlag != "" {
+		flags = append(flags, "-"+v.PFlag)
+	}
+	if v.Flag != "" {
+		flags = append(flags, "--"+v.Flag)
+	}
+	top.Write(v.syntax(flags, name, synlen-1))
 	top.Write(v.connector(int(collen)-utf8.RuneCount(top.Bytes()), usage))
 	buf.Write(v.usage(wrap(maxlen, top.Bytes()), v.inherit(0, 0), collen, maxlen))
 
