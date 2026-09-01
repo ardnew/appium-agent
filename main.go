@@ -20,7 +20,7 @@ import (
 	"github.com/ardnew/appium-agent/status"
 )
 
-var Version = "0.7.0"
+var Version = "0.8.0"
 
 func main() {
 	var (
