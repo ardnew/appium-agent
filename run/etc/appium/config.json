@@ -12,7 +12,6 @@
         "automationName": "XCUITest",
         "platformVersion": "18.0",
         "udid": "00008101-0005499E010B001E",
-        "bundleId": "com.ardnew.Example",
         "noReset": true
       }
     },

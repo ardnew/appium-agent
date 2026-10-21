@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"io"
@@ -20,7 +21,8 @@ import (
 	"github.com/ardnew/appium-agent/status"
 )
 
-var Version = "0.8.0"
+//go:embed semver.ascii
+var Version string
 
 func main() {
 	var (
@@ -121,54 +123,35 @@ func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
 	// Here, we override all configuration parameters
 	// that were defined via command-line flags
 	//  (and mark them accordingly with .UserDef = true).
-	modifyConfig := cfg.ApplyToFlags(fset.Visit, // only those that were set
+	modifyConfig := cfg.ApplyToFlags(
+		fset.Visit, // only those that were set
 		func(v *config.Var) bool { v.UserDef = true; return true },
 	)
 
 	// Any operation that modifies flags based on a given command-line flag
 	// MUST set the UserDef flag to true on the given flag
 	// AND all collateral flags that were modified.
-	type modVar func(*config.Var)
-
-	modDefault := func(flag string, mod modVar) {
-		ptr, found := cfg.Env.Get(func(v *config.Var) bool {
-			return v.Flag == flag || v.PFlag == flag
-		})
-		if found && !ptr.UserDef {
-			mod(ptr)
-			ptr.UserDef = true // mark as user-defined
-		}
-	}
-	reset := func(str string) modVar {
-		return func(env *config.Var) {
-			env.Set(str)
-		}
-	}
-	setTail := func(str string) modVar {
-		return func(env *config.Var) {
-			id := strings.Split(env.String(), ".")
-			if len(id) > 0 {
-				id[len(id)-1] = str
-			}
-			env.Set(strings.Join(id, "."))
-		}
-	}
-
-	if cfg.Debug {
-		modDefault("target-app-config", reset("Debug"))
-		modDefault("test-driver-config", reset("Debug"))
-		modDefault("target-app-bundle", setTail("App"))
-		modDefault("test-driver-bundle", setTail("App"))
-	}
 
 	// We now need to override any configuration parameters
 	// found in the environment that were not already set via command-line flags.
+	// Reload persisted settings after environment defaults unless --zero requests flags and environment only.
 	cfg.Env = cfg.Env.Override(cfg.Orphan, cfg.Zero)
-	if mode == command.ModeTestDriverOnly || mode == command.ModeRelaunchTestDriver || mode == command.ModeActivateIPA {
+	if !cfg.Zero {
 		if source, sourceErr := config.LookupSource(); sourceErr == nil {
-			if loadErr := cfg.Env.OverrideFile(source); loadErr != nil {
+			if loadErr := cfg.Env.OverrideFile(source); loadErr != nil && !errors.Is(loadErr, os.ErrNotExist) {
 				return "", fmt.Errorf("load current Appium configuration: %w", loadErr)
 			}
+		}
+	}
+	modifyConfig = applyDebugDefaults(cfg, mode) || modifyConfig
+	if mode == command.ModeFull && !exitsAfterDeviceOperation(cmd) {
+		projSource, _ := cfg.Env.Get(func(v *config.Var) bool { return v.Ident == "proj_source" })
+		targetIPA, _ := cfg.Env.Get(func(v *config.Var) bool { return v.Ident == "target_app_ipa" })
+		if strings.TrimSpace(projSource.String()) != "" && targetIPA.String() != "" && !targetIPA.UserDef {
+			if err = cfg.Set("target_app_ipa", ""); err != nil {
+				return "", fmt.Errorf("clear stale target IPA: %w", err)
+			}
+			modifyConfig = true
 		}
 	}
 	if mode == command.ModeActivateIPA {
@@ -213,11 +196,7 @@ func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
 		os.Exit(0)
 	}
 
-	optional := []string{"target_app_ipa"}
-	if mode == command.ModeActivateIPA {
-		optional = []string{"proj_source"}
-	}
-	if err = cfg.ValidateExcept(optional...); err != nil {
+	if err = cfg.ValidateExcept(configurationExclusions(mode)...); err != nil {
 		return "", fmt.Errorf("validate Appium configuration: %w", err)
 	}
 
@@ -242,6 +221,58 @@ func parseFlags(cfg *config.Model, cmd *command.Model) (string, error) {
 	// but is NOT saving the configuration to the default config file.
 	// This allows for one-off test runs without committing anything to disk.
 	return tmpConfig, nil
+}
+
+func applyDebugDefaults(cfg *config.Model, mode string) bool {
+	if !cfg.Debug {
+		return false
+	}
+	modDefault := func(flag string, update func(*config.Var)) bool {
+		value, found := cfg.Env.Get(func(v *config.Var) bool {
+			return v.Flag == flag || v.PFlag == flag
+		})
+		if !found || value.UserDef {
+			return false
+		}
+		update(value)
+		value.UserDef = true
+		return true
+	}
+	set := func(value string) func(*config.Var) {
+		return func(variable *config.Var) { variable.Value = value }
+	}
+	setTail := func(suffix string) func(*config.Var) {
+		return func(variable *config.Var) {
+			parts := strings.Split(variable.String(), ".")
+			if len(parts) > 0 {
+				parts[len(parts)-1] = suffix
+			}
+			variable.Value = strings.Join(parts, ".")
+		}
+	}
+	var modified bool
+	switch mode {
+	case command.ModeTestDriverOnly, command.ModeRelaunchTestDriver:
+		modified = modDefault("test-driver-config", set("Debug")) || modified
+		modified = modDefault("test-driver-bundle", setTail("App")) || modified
+	case command.ModeFull:
+		modified = modDefault("target-app-config", set("Debug")) || modified
+		modified = modDefault("target-app-bundle", setTail("App")) || modified
+	}
+	return modified
+}
+
+func configurationExclusions(mode string) []string {
+	switch mode {
+	case command.ModeTestDriverOnly, command.ModeRelaunchTestDriver:
+		return []string{"proj_source", "proj_scheme", "target_app_ipa", "xcbuild_act", "proj_config", "bundled_app"}
+	case command.ModeActivateIPA:
+		return []string{"proj_source", "proj_scheme", "xcbuild_act", "proj_config", "test_driver_source", "test_driver_scheme", "test_config", "bundled_drv"}
+	case command.ModeRestart:
+		return []string{"proj_source", "target_app_ipa", "proj_scheme", "test_driver_scheme", "xcbuild_act", "proj_config", "bundled_app", "test_driver_source", "test_config", "bundled_drv"}
+	default:
+		return []string{"target_app_ipa", "test_driver_source", "test_driver_scheme", "test_config", "bundled_drv", "bundled_app"}
+	}
 }
 
 func exitsAfterDeviceOperation(cmd *command.Model) bool {
@@ -270,10 +301,11 @@ func makeFlagSet(
 	fset.BoolVarP(&cfg.Debug, "debug-config", "g", false,
 		"Use the target debug configuration by default")
 	fset.BoolVarP(&cmd.LLDBManaged, "lldb-managed", "M", false,
-		"Wrap the test-driver launch in an LLDB watcher that breaks on "+
-			"uncaught Objective-C/C++ exceptions before the app terminates")
+		"Attach LLDB to Calculator or test-driver launches and break on "+
+			"uncaught Objective-C/C++ exceptions without restarting the driver")
 	fset.BoolVar(&cmd.TestDriverOnly, "test-driver-only", false,
-		"Build, install, and launch only FMPS Test Driver, then restart Appium")
+		"Build, install, and launch FMPS Test Driver from "+
+			"--test-driver-source, then restart Appium")
 	fset.BoolVar(&cmd.RelaunchTestDriver, "relaunch-test-driver", false,
 		"Relaunch the previously installed FMPS Test Driver, then restart Appium")
 	fset.StringVar(&cmd.ActivateIPA, "activate-ipa", "",
@@ -307,7 +339,7 @@ func makeFlagSet(
 			f.NoOptDefVal = "true"
 		}
 	}
-	fset.Usage = cfg.Env.Usage(bin, Version, opVar...)
+	fset.Usage = cfg.Env.Usage(bin, strings.TrimSpace(Version), opVar...)
 	return
 }
 

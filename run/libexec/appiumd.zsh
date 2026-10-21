@@ -11,10 +11,10 @@
 #
 #   • appium-agent --help
 #
-#  This script takes no arguments and locates its dependencies automatically by
-#  file paths relative to the location of this script. All configurable options
-#  are provided implicitly through environment variables. A list of these
-#  variables and their current default values are defined in:
+#  This script locates its dependencies relative to its own location. Public
+#  configuration uses environment variables; arguments are reserved for internal
+#  watchdog operations. A list of configurable environment variables and their
+#  current default values is defined in:
 #
 #   • ${FSDS_PREFIX}/etc/appium/config.env
 #
@@ -180,15 +180,14 @@ ERR_UNKNOWN=100
 
 session='Appium'
 driver_session='FMPS Test Driver'
+watch_session='WDA Watchdog'
 startin=$root
-logsemt="${root}/var/log/emt"
-logsusb="${root}/var/log/ios-usb-proxy"
-logstun="${root}/var/log/ios-tunnel"
 logsapp="${root}/var/log/appium"
 logserv="${root}/var/log/appium/session.log"
 logappd="${root}/var/log/appium/server.log"
 logdrvr="${root}/var/log/appium/driver.log"
 logprox="${root}/var/log/appium/proxy.log"
+recoverylog="${logsapp}/recovery.log"
 cfglock="${root}/var/run/appium/session.lock"
 cfgjson="${root}/etc/appium/config.json"
 wdalock="${root}/var/run/appium/build.lock"
@@ -204,6 +203,10 @@ tunctrl="${root}/var/run/ios-tunnel/enable/true"
 webserv="${root}/bin/emt-proxy"
 
 numjobs=$( nproc )
+
+if [[ ${1:-} == --watch-driver || ${1:-} == --recover-driver ]]; then
+  export appium_config_env=${2:?missing watchdog configuration path}
+fi
 
 # Source the dynamic settings from a sh-formatted file
 if [[ -r "${appium_config_env}" ]]; then
@@ -262,32 +265,23 @@ prune() {
 
 rotatelogs() {
   local -r maxage=7 # prune logs created more than this many days ago
-  local dir=${1}
-  [[ -d "${dir}" ]] || return 0 # nothing to do (not an error)
-
-  mkdir -p "${dir}/backup"
-
-  for lf in "${dir}"/*.log; do
+  local lf dir base
+  for lf in "${@}"; do
+    dir=${lf%/*}
     base=${lf##*/}
-    # move the given file into the backup dir (if it exists)
+    mkdir -p "${dir}/backup" || return
     [[ ! -f "${lf}" ]] ||
-      mv "${lf}" "${dir}/backup/${base%.log}.${date}.log"
-    # replace it with a new, empty log file
-    touch "${lf}"
+      mv "${lf}" "${dir}/backup/${base%.log}.${date}.log" || return
+    touch "${lf}" || return
     # remove all log files older than ${maxage} days
     find "${dir}/backup" \
       -type f \
       -name "${base%.log}.*.log" \
       -mtime +${maxage} \
-      -delete
+      -delete || return
   done
 }
 
-rotate() {
-  for logdir in "${@}"; do
-    rotatelogs "${logdir}"
-  done
-}
 
 srcroot() {
   # Check for the existence of some relative path to determine if we are in the
@@ -312,8 +306,7 @@ prepsdk() {
   # and leaking set -ex into the caller's environment.
   (
     set -ex
-    # Only kill xcodebuild processes owned by the current user
-    pkill -9 -U "${UID}" -f "xcodebuild" || true
+    # Keep other xcodebuild owners, including the active test driver, alive.
     security unlock-keychain -p "${sec_kc_pass}" "${sec_kc_name}.keychain"
   )
 }
@@ -397,48 +390,81 @@ build() {
   echo xcodebuild ${xcargs} ${action}
 }
 
-installipa() {
-  local ipa="${1}"
-
-  local bundled_xct="${bundled_drv}.xctrunner"
-
-  local -a rmipa=( $( installed-conflict-apps "${target_dest#id=}" "${bundled_app}" ) )
-  local -a rmdrv=( $( installed-team-apps "${target_dest#id=}" | grep -F "${bundled_drv}" ) )
-
-  pout "Terminating apps with bundle IDs matching imminent installs:"
-  pout "  kill -> ${bundled_app}"
-  pout "  kill -> ${bundled_drv}"
-  ( ios kill "${bundled_xct}" --udid "${target_dest#id=}" |& tee -a "${logserv}" ) || true
-  ( ios kill "${bundled_app}" --udid "${target_dest#id=}" |& tee -a "${logserv}" ) || true
-
-  if [[ ${#rmipa[@]} -gt 0 || ${#rmdrv[@]} -gt 0 ]]; then
-    pout "Removing apps with conflicting bundle IDs:"
-    pout "  ${bundled_app} -> ${rmipa[*]:-(no conflicts)}"
-    pout "  ${bundled_drv} -> ${rmdrv[*]:-(no conflicts)}"
-    for bundle in "${rmipa[@]}" "${rmdrv[@]}"; do
-      ios uninstall "${bundle}" --udid "${target_dest#id=}" |& tee -a "${logserv}"
-    done
-  fi
-
-  ios install --path "${ipa}" --udid "${target_dest#id=}" |& jq --color-output --compact-output --raw-output '[ ( now | strftime("%Y-%m-%d | %H:%M:%S") ), ( last( .percentComplete? | tostring + "%" | while( . | length < 5; " " + . ) ) // "----" ), ( .status // .msg ) ] | join(" | ")'
-
-  pout "launching test driver: ${bundled_drv}"
-}
-
 installapp() {
   setopt localoptions pipefail
   local ipa=${1:?missing IPA path}
-  local -a rmipa=( $( installed-conflict-apps "${target_dest#id=}" "${bundled_app}" ) )
+  local bundle
+  bundle=$(ipa-bundle-identifier "${ipa}") || {
+    perr "cannot determine Calculator bundle ID from IPA: ${ipa}"
+    return ${ERR_PROJECT}
+  }
+  [[ -n ${bundle} ]] || {
+    perr "Calculator IPA has an empty bundle ID: ${ipa}"
+    return ${ERR_PROJECT}
+  }
+  local app_bundle=${bundle}
+  local manifested_driver=''
+  if [[ -r ${driverstate} ]]; then
+    manifested_driver=$(jq -r '.runner_bundle // empty' "${driverstate}" 2>/dev/null) || manifested_driver=''
+  fi
+  if [[ ${bundle} == "${bundled_drv}" || ${bundle} == "${bundled_drv}.xctrunner" ||
+      ( -n ${manifested_driver} && ${bundle} == "${manifested_driver}" ) ]]; then
+    perr "refusing Calculator IPA that would replace the selected FMPS Test Driver: ${bundle}"
+    return ${ERR_PROJECT}
+  fi
+  local removals
+  removals=$(installed-conflict-apps "${target_dest#id=}" "${bundle}" "${ipa}") || return
+  local -a rmipa=( ${=removals} )
 
-  pout "terminating target app: ${bundled_app}"
-  ios kill "${bundled_app}" --udid "${target_dest#id=}" |& tee -a "${logserv}" || true
+  pout "terminating target app: ${bundle}"
+  ios kill "${bundle}" --udid "${target_dest#id=}" |& tee -a "${logserv}" || true
   if [[ ${#rmipa[@]} -gt 0 ]]; then
     pout "removing conflicting target apps: ${rmipa[*]}"
-    for bundle in "${rmipa[@]}"; do
-      ios uninstall "${bundle}" --udid "${target_dest#id=}" |& tee -a "${logserv}"
+    for conflict in "${rmipa[@]}"; do
+      [[ "${conflict}" == "${app_bundle}" ]] || continue
+      ios uninstall "${conflict}" --udid "${target_dest#id=}" |& tee -a "${logserv}" || return
     done
   fi
-  ios install --path "${ipa}" --udid "${target_dest#id=}" |& tee -a "${logserv}"
+  ios install --path "${ipa}" --udid "${target_dest#id=}" |& tee -a "${logserv}" || return
+  bundled_app=${app_bundle}
+  app_id=${bundled_app}
+  export FSDS_APP_ID=${bundled_app}
+  persist-appium-config-value bundled_app "${bundled_app}"
+}
+
+persist-appium-config-value() {
+  local key=${1:?missing Appium config key}
+  local value=${2:?missing Appium config value}
+  [[ ${key} == bundled_app || ${key} == bundled_drv ]] || return 1
+  local env=${appium_config_env:-${cfgjson%.json}.env}
+  [[ -r ${env} ]] || {
+    perr "cannot persist ${key}; Appium config is unreadable: ${env}"
+    return 1
+  }
+  local assignment tmp mode
+  printf -v assignment 'export %s=%q' "${key}" "${value}"
+  tmp=$(mktemp "${env}.XXXXXX") || return
+  mode=$(/usr/bin/stat -f '%Lp' "${env}") || { rm -f "${tmp}"; return 1; }
+  awk -v key="${key}" -v assignment="${assignment}" '
+    BEGIN { found = 0; pattern = "^[[:space:]]*(export[[:space:]]+)?"; pattern = pattern key "=" }
+    $0 ~ pattern { print assignment; found = 1; next }
+    { print }
+    END { if (!found) print assignment }
+  ' "${env}" >"${tmp}" &&
+    chmod "${mode}" "${tmp}" &&
+    mv "${tmp}" "${env}" || {
+      rm -f "${tmp}"
+      perr "cannot persist ${key} to Appium config: ${env}"
+      return 1
+    }
+}
+
+sync-driver-bundle() {
+  [[ -r ${driverstate} ]] || return 0
+  local runner
+  runner=$(jq -r '.runner_bundle // empty' "${driverstate}" 2>/dev/null) || return 0
+  [[ -n ${runner} ]] || return 0
+  export bundled_drv=${runner%.xctrunner}
 }
 
 driverinstalled() {
@@ -447,16 +473,54 @@ driverinstalled() {
     jq -e --arg bundle "${bundle}" '.. | objects | (.bundleIdentifier? // .CFBundleIdentifier? // .bundleID?) | select(. == $bundle)' >/dev/null
 }
 
-ensuredriverstate() {
-  [[ -r "${driverstate}" ]] && return 0
-  local runner="${bundled_drv}.xctrunner"
-  driverinstalled "${runner}" || return 1
-  mkdir -p "${driverstate%/*}"
-  local state="${driverstate}.new"
-  jq -n --arg source "${proj_source}" --arg runner "${runner}" \
-    --arg xctest 'FMPS Test Driver.xctest' --arg config "${test_config}" --arg udid "${target_dest#id=}" \
-    '{source:$source,runner_bundle:$runner,xctest:$xctest,configuration:$config,udid:$udid}' > "${state}"
-  mv "${state}" "${driverstate}"
+preparedriver() {
+  setopt localoptions pipefail
+  [[ -r "${driverstate}" ]] || {
+    perr "test driver manifest missing; use t to rebuild the driver"
+    return ${ERR_PROJECT}
+  }
+  local source runner udid xctestrun runner_path
+  source=$(jq -r '.source // empty' "${driverstate}") || return
+  runner=$(jq -r '.runner_bundle // empty' "${driverstate}") || return
+  udid=$(jq -r '.udid // empty' "${driverstate}") || return
+  xctestrun=$(jq -r '.xctestrun // empty' "${driverstate}") || return
+  runner_path=$(jq -r '.runner_path // empty' "${driverstate}") || return
+  [[ -n ${runner} && ${udid} == "${target_dest#id=}" &&
+      -r ${xctestrun} && -d ${runner_path} ]] || {
+    perr "test driver artifacts missing or device mismatch; use t to rebuild the driver"
+    return ${ERR_PROJECT}
+  }
+  local -a bundles=("${runner_path}"/PlugIns/*.xctest(N))
+  [[ ${#bundles} -eq 1 ]] || {
+    perr "test driver bundle missing; use t to rebuild the driver"
+    return ${ERR_PROJECT}
+  }
+  if [[ ${appium_mode} == relaunch-test-driver && ${source} != "${test_driver_source}" ]]; then
+    perr "selected test driver source does not match installed artifacts: ${source}"
+    return ${ERR_PROJECT}
+  fi
+  driverinstalled "${runner}" || {
+    perr "test driver is not installed on device: ${runner}"
+    return ${ERR_PROJECT}
+  }
+  # Destination artifacts prevent Xcode from reinstalling the driver or Calculator.
+  driverrun="${xctestrun%.xctestrun}.destination.xctestrun"
+  plutil -convert json -o - "${xctestrun}" |
+    jq -e --arg runner "${runner}" --arg app "${bundled_app}" '
+      if .__xctestrun_metadata__.FormatVersion != 2 then error("unsupported xctestrun format") else . end |
+      .TestConfigurations |= map(.TestTargets |= map(
+        select(.TestHostBundleIdentifier == $runner) |
+        if (.TestBundlePath | type) != "string" then error("test bundle path missing") else . end |
+        .UseDestinationArtifacts = true |
+        .TestBundleDestinationRelativePath = .TestBundlePath |
+        .UITargetAppBundleIdentifier = $app |
+        del(.TestHostPath, .TestBundlePath, .UITargetAppPath, .DependentProductPaths)
+      )) |
+      if ([.TestConfigurations[].TestTargets[]] | length) == 0
+        then error("driver target missing from xctestrun") else . end' |
+    plutil -convert xml1 -o "${driverrun}.new" - || return
+  mv "${driverrun}.new" "${driverrun}" || return
+  export bundled_drv=${runner%.xctrunner}
 }
 
 stopdriver() {
@@ -466,36 +530,109 @@ stopdriver() {
   [[ -z ${bundle} ]] || ios kill "${bundle}" --udid "${target_dest#id=}" |& tee -a "${logserv}" || true
 }
 
-launchdriver() {
-  [[ -r "${driverstate}" ]] || {
-    perr "test driver manifest not found: ${driverstate}"
-    return ${ERR_PROJECT}
-  }
-  local source runner xctest udid
-  source=$( jq -r '.source // empty' "${driverstate}" )
-  runner=$( jq -r '.runner_bundle // empty' "${driverstate}" )
-  xctest=$( jq -r '.xctest // empty' "${driverstate}" )
-  udid=$( jq -r '.udid // empty' "${driverstate}" )
-  [[ -n ${runner} && -n ${xctest} && ${udid} == "${target_dest#id=}" ]] || {
-    perr "test driver manifest is incomplete or belongs to another device"
-    return ${ERR_PROJECT}
-  }
-  export bundled_drv=${runner%.xctrunner}
-  if [[ -n ${proj_source} && ${appium_mode} == relaunch-test-driver && ${source} != ${proj_source} ]]; then
-    perr "selected project does not match installed test driver: ${source}"
-    return ${ERR_PROJECT}
-  fi
-  driverinstalled "${runner}" || {
-    perr "test driver is not installed on device: ${runner}"
-    return ${ERR_PROJECT}
-  }
+wda_ready() {
+  setopt localoptions pipefail
+  curl -fsS --max-time 2 "${service_url}/status" 2>/dev/null |
+    jq -e '.value.ready == true' >/dev/null 2>&1
+}
 
-  pout "launching FMPS Test Driver: ${runner}"
+waitforwda() {
+  local timeout=$1 elapsed=0
+  while (( elapsed <= timeout )); do
+    wda_ready && return 0
+    sleep 2
+    elapsed=$(( elapsed + 2 ))
+  done
+  return 1
+}
+
+startdriverwatch() {
+  if [[ ${driver_recovery:-false} != true ]] || truth "${lldb_managed:-false}"; then
+    tmux kill-session -t "${watch_session}" 2>/dev/null || true
+  fi
+  [[ -r ${driverstate} ]] || return 0
+  truth "${lldb_managed:-false}" && return 0
+  exists "${watch_session}" && return 0
+  tmux new-session -d -s "${watch_session}" -- \
+    zsh -c 'exec zsh "$1" --watch-driver "$2" >>"$3" 2>&1' \
+      watchdog "${self}" "${appium_config_env:-${cfgjson%.json}.env}" "${recoverylog}" \; \
+    set-option -w -t "${watch_session}" remain-on-exit off
+}
+
+watchdriver() {
+  local misses=0 attempts=0 healthy_since=-1 failed_since=-1 exhausted=false owner result
+  pout "WDA watchdog started"
+  while true; do
+    sleep 2
+    if [[ -d ${provisionlock} ]]; then
+      owner=''
+      [[ ! -r ${provisionpid} ]] || owner=$(<"${provisionpid}")
+      if [[ ${owner} != <-> ]] || kill -0 "${owner}" 2>/dev/null; then
+        misses=0
+        healthy_since=-1
+        failed_since=-1
+        continue
+      fi
+    fi
+    exists "${session}" || return 0
+    [[ -r ${driverstate} ]] || return 0
+    [[ ! -r ${appium_config_env} ]] || . "${appium_config_env}"
+    truth "${lldb_managed:-false}" && return 0
+    [[ -n ${service_url} ]] || service_url="http://localhost:${driver_port:-8100}"
+    if wda_ready && exists "${driver_session}"; then
+      misses=0
+      failed_since=-1
+      (( healthy_since >= 0 )) || healthy_since=${SECONDS}
+      if (( SECONDS - healthy_since >= 120 )); then
+        attempts=0
+        exhausted=false
+      fi
+      continue
+    fi
+    healthy_since=-1
+    (( failed_since >= 0 )) || failed_since=${SECONDS}
+    misses=$((misses + 1))
+    if exists "${driver_session}"; then
+      (( misses >= 3 )) || continue
+      # shortcut: /status blocks with commands; raise the 300s grace if supported commands exceed it.
+      if (( SECONDS - failed_since < 300 )) &&
+          ! grep -Eq 'libc\+\+abi: terminating|Restarting after unexpected exit|Test crashed with signal|TEST EXECUTE FAILED' "${logdrvr}" 2>/dev/null; then
+        continue
+      fi
+    fi
+    if (( attempts >= 3 )); then
+      if ! ${exhausted}; then
+        perr "WDA automatic recovery exhausted (3 attempts); use T after correcting the failure"
+        exhausted=true
+      fi
+      continue
+    fi
+    pout "WDA unavailable; automatic relaunch attempt $((attempts + 1))/3"
+    result=0
+    zsh "${self}" --recover-driver "${appium_config_env}" || result=$?
+    # Lock contention is not a failed recovery attempt.
+    (( result != ERR_EXELOCK )) || continue
+    attempts=$((attempts + 1))
+    misses=0
+    failed_since=-1
+    if (( result == 0 )); then
+      pout "WDA recovery completed; clients must create new Appium sessions"
+    else
+      perr "WDA recovery failed with status ${result}"
+    fi
+    sleep 10
+  done
+}
+
+launchdriver() {
+  preparedriver || return
+
+  pout "launching FMPS Test Driver with Xcode: ${bundled_drv}"
   stopdriver
-  : > "${logdrvr}"
+  rotatelogs "${logdrvr}" || return
   tmux new-session -d -s "${driver_session}" -- \
-    ios runwda --bundleid "${runner}" --testrunnerbundleid "${runner}" \
-      --xctestconfig "${xctest}" --log-output "${logdrvr}" --udid "${target_dest#id=}"
+    zsh -c 'exec xcodebuild test-without-building -xctestrun "$1" -destination "$2" >> "$3" 2>&1' \
+      driver "${driverrun}" "${target_dest}" "${logdrvr}" || return
 
   local elapsed=0 timeout=120 url
   while (( elapsed < timeout )); do
@@ -504,7 +641,14 @@ launchdriver() {
       url=${url#ServerURLHere->}
       url=${url%<-ServerURLHere}
       export service_url=$( sed -E 's#^([^/]+//)[^:]+(:[0-9]+)$#\1localhost\2#' <<< "${url}" )
-      return 0
+      if waitforwda 10; then
+        return 0
+      fi
+      pout "WDA is not ready at ${service_url}; reloading iOS tunnel and USB proxy"
+      reload-ios-tunnel || return ${ERR_USBPROX}
+      waitforwda 30 && return 0
+      perr "WDA did not become ready at ${service_url} after reloading the iOS tunnel and USB proxy"
+      return ${ERR_USBPROX}
     fi
     exists "${driver_session}" || {
       perr "FMPS Test Driver exited before publishing its service URL"
@@ -514,17 +658,38 @@ launchdriver() {
     elapsed=$(( elapsed + 2 ))
   done
   perr "timed out waiting for FMPS Test Driver service URL"
+  tmux kill-session -t "${driver_session}" 2>/dev/null || true
   return ${ERR_COMPILE}
 }
 
 builddriver() {
   setopt localoptions pipefail
 
-  pout "building FMPS Test Driver from: ${proj_source}"
-  mkdir -p "${driverderived}" "${driverstate%/*}"
-  rm -rf "${driverderived}"
-  mkdir -p "${driverderived}"
-  eval "$( build '' '' '' '' '' '' build-for-testing ) -derivedDataPath '${driverderived}'" |& tee -a "${logdrvr}"
+  [[ -n ${test_driver_source} ]] || {
+    perr "test driver source is not selected; use t to select a driver source"
+    return ${ERR_PROJECT}
+  }
+  pout "building FMPS Test Driver from: ${test_driver_source}"
+  local retained_run='' builddir=${driverderived}
+  if [[ -r ${driverstate} ]]; then
+    retained_run=$(jq -r '.xctestrun // empty' "${driverstate}") || return
+  fi
+  # Alternate build slots so a failed replacement cannot erase retained artifacts.
+  [[ ${retained_run:A} != "${driverderived:A}/"* ]] || builddir="${driverderived}.next"
+  local driverderived=${builddir}
+  mkdir -p "${driverderived}" "${driverstate%/*}" || return
+  rm -rf "${driverderived}" || return
+  mkdir -p "${driverderived}" || return
+  local driver_scheme=${test_driver_scheme:-'FMPS Calculator'}
+  # Preserve Calculator's linker settings while enabling exception unwinding in WDA.
+  # Select the setting name first: :default=$(inherited) concatenates list-valued flags.
+  local driver_ldflags="'FSDS_DRIVER_LDFLAGS_WebDriverAgent=FSDS_WDA_LINKER_FLAGS' 'FSDS_DRIVER_LDFLAGS_FMPS_Test_Driver=FSDS_WDA_LINKER_FLAGS' 'FSDS_WDA_LINKER_FLAGS=-all_load' 'OTHER_LDFLAGS=\$(\$(FSDS_DRIVER_LDFLAGS_\$(TARGET_NAME:c99extidentifier):default=inherited))'"
+  eval "$( build '' "${test_driver_source}" "${driver_scheme}" "${test_config}" '' '' build-for-testing ) ${driver_ldflags} -derivedDataPath '${driverderived}'" |& tee -a "${logdrvr}" || return
+  local -a runs=("${driverderived}"/Build/Products/*.xctestrun(N))
+  [[ ${#runs} -eq 1 ]] || {
+    perr "expected one generated xctestrun, found ${#runs}"
+    return ${ERR_COMPILE}
+  }
 
   local products="${driverderived}/Build/Products/${test_config}-iphoneos"
   local -a runners=( "${products}"/**/*Runner.app(N) )
@@ -538,17 +703,19 @@ builddriver() {
     perr "expected one generated XCTest bundle, found ${#tests[@]}"
     return ${ERR_COMPILE}
   }
-  local bundle=$( plutil -extract CFBundleIdentifier raw -o - "${runner}/Info.plist" )
-  local xctest=${tests[1]##*/}
+  local bundle
+  bundle=$(plutil -extract CFBundleIdentifier raw -o - "${runner}/Info.plist") || return
+  local xctestrun=${runs[1]}
   pout "installing FMPS Test Driver: ${bundle}"
-  ios install --path "${runner}" --udid "${target_dest#id=}" |& tee -a "${logserv}"
+  ios install --path "${runner}" --udid "${target_dest#id=}" |& tee -a "${logserv}" || return
 
   local state="${driverstate}.new"
-  jq -n --arg source "${proj_source}" --arg runner "${bundle}" \
-    --arg xctest "${xctest}" --arg config "${test_config}" --arg udid "${target_dest#id=}" \
-    '{source:$source,runner_bundle:$runner,xctest:$xctest,configuration:$config,udid:$udid}' > "${state}"
-  mv "${state}" "${driverstate}"
+  jq -n --arg source "${test_driver_source}" --arg runner "${bundle}" \
+    --arg xctestrun "${xctestrun}" --arg runner_path "${runner}" --arg config "${test_config}" --arg udid "${target_dest#id=}" \
+    '{source:$source,runner_bundle:$runner,xctestrun:$xctestrun,runner_path:$runner_path,configuration:$config,udid:$udid}' > "${state}" || return
+  mv "${state}" "${driverstate}" || return
   export bundled_drv=${bundle%.xctrunner}
+  persist-appium-config-value bundled_drv "${bundled_drv}" || return
   launchdriver
 }
 
@@ -570,7 +737,7 @@ makeipa() {
   "${builder}" -Z -c release -x "${proj_scheme}, ${proj_config}" -k "iphoneos${sdk_version}" -i "${ios_version}" "${verbose[@]}" "${ipapath}" &&
     ipa=$( find "${ipapath}" -type f -name '*.ipa' ) &&
       ln -sf "${ipa}" "${expoipa}" &&
-        installipa "${ipa}"
+        installapp "${ipa}"
 }
 
 exists() {
@@ -643,6 +810,7 @@ config() {
     perr 'config: appium config already locked' |& tee -a "${logserv}"
     return ${ERR_EXELOCK}
   fi
+  config_locked=true
 
   # Always define the following options
   local opts=(
@@ -732,15 +900,15 @@ config() {
     'useNativeCachingStrategy: false'
     'mjpegServerPort: 9100'
   )
-  [[ -z ${target_app_ipa} ]] || opts+=( 'app: env.target_app_ipa' )
   local query=$(
     jqfilter "{ ${(j:,:)opts} }" server default-capabilities appium:options
   )
-  if ! jq "${query}" "${cfgjson}" > "${cfglock}"; then
+  if ! jq "del(.server.\"default-capabilities\".app, .server.\"default-capabilities\".\"appium:app\", .server.\"default-capabilities\".\"appium:options\".app, .server.\"default-capabilities\".\"appium:options\".\"appium:app\") | ${query}" "${cfgjson}" > "${cfglock}"; then
     perr "config: failed to apply JSON filter: ${query}" |& tee -a "${logserv}"
     return 1
   fi
-  mv "${cfglock}" "${cfgjson}"
+  mv "${cfglock}" "${cfgjson}" || return
+  config_locked=false
 }
 
 # debugwatch arms an LLDB watcher, in a dedicated tmux window, that attaches
@@ -772,13 +940,8 @@ create() {
   {
   set -e
 
-  # rotate our log files
-  rotate "${logsemt}" "${logsusb}" "${logstun}" "${logsapp}"
-
-  # prune old log files
-  prune "${logsemt}/backup"
-  prune "${logsusb}/backup"
-  prune "${logstun}/backup"
+  # Only rotate logs whose writers are restarted here.
+  rotatelogs "${logserv}" "${logappd}" || return
   prune "${logsapp}/backup"
 
   prune "${expodir}" 'appiumd-*'
@@ -812,62 +975,18 @@ create() {
     fi
   fi
 
-  # if ${appium_restart} is non-empty, then skip building the target app and
-  # test driver, and proceed immediately to launch Appium
+  # A restart skips the Calculator build/install; Driver lifecycle is explicit.
   if [[ x${appium_restart} == x ]]; then
     # build and install the Calc App .ipa for installation on target device
     makeipa || return ${ERR_COMPILE}
   fi
   export xcprov_type='Development'
 
-  if [[ x${service_url} == x ]]; then
-    # Launch xcodebuild in background, tee output to driver log,
-    # then poll the log for the WDA server URL.
-    eval "$( build )" >> "${logdrvr}" 2>&1 &
-    local xcode_pid=$!
-
-    local url= elapsed=0 timeout=300
-    while (( elapsed < timeout )); do
-      if [[ -f "${logdrvr}" ]]; then
-        url=$( grep -oE 'ServerURLHere->https?://[0-9.]+:[0-9]+<-ServerURLHere' "${logdrvr}" | head -1 )
-        if [[ -n ${url} ]]; then
-          url=${url#ServerURLHere->}
-          url=${url%<-ServerURLHere}
-          break
-        fi
-        # Bail out early if xcodebuild reported a build or test failure
-        if grep -qE '^\*\* (TEST|BUILD) FAILED \*\*$' "${logdrvr}"; then
-          kill ${xcode_pid} 2>/dev/null || true
-          local failure=$( grep -E 'Testing failed:|Build failed:' "${logdrvr}" )
-          perr "create: xcodebuild failed:" |& tee -a "${logserv}"
-          # Log the failure details (signing errors, etc.) for diagnosis
-          grep -E '(Signing certificate|Testing failed|Testing cancelled|Build failed)' "${logdrvr}" |& tee -a "${logserv}"
-          return ${ERR_COMPILE}
-        fi
-      fi
-      # Also bail out if xcodebuild exited on its own (crash, early error)
-      if ! kill -0 ${xcode_pid} 2>/dev/null; then
-        wait ${xcode_pid} || true
-        perr "create: xcodebuild exited unexpectedly before producing a WDA server URL" |& tee -a "${logserv}"
-        [[ ! -f "${logdrvr}" ]] || tail -5 "${logdrvr}" |& tee -a "${logserv}"
-        return ${ERR_COMPILE}
-      fi
-      sleep 2
-      elapsed=$(( elapsed + 2 ))
-    done
-
-    if [[ -z ${url} ]]; then
-      kill ${xcode_pid} 2>/dev/null || true
-      perr "create: timed out waiting for WDA server URL (${timeout}s)" |& tee -a "${logserv}"
-      return 1
-    fi
-
-    # use local TCP port forwarding via USB (usbmuxd) instead of direct TCP/IP
-    url=$( sed -E 's/^([^\/]+\/\/)[^:]+(:[0-9]+)$/\1localhost\2/' <<< ${url} )
-    export service_url=${url}
+  [[ -n ${service_url} ]] || export service_url="http://localhost:${driver_port:-8100}"
+  if ! wda_ready; then
+    perr "WebDriverAgent is not available at ${service_url}; Calculator installation is preserved. Use t to select and start the FMPS Test Driver."
   fi
-
-  # construct Appium configuration file "config.json" and exec arguments
+  sync-driver-bundle || return ${ERR_CFGFILT}
   config || return ${ERR_CFGFILT}
   local args=(
     --address "$( ifaddr "${listen_name}" )"
@@ -884,6 +1003,7 @@ create() {
   # Arm the LLDB watcher now that the "${1}" tmux session exists and
   # ${target_udid} has been set (both required by debugwatch).
   truth ${lldb_managed} && debugwatch
+  startdriverwatch || return
   return 0
 
   } always {
@@ -925,19 +1045,28 @@ provision() {
   fi
   print -r -- $$ > "${provisionpid}"
   provision_locked=true
+  if [[ ${driver_recovery:-false} == true ]]; then
+    exists "${session}" || return ${ERR_EXELOCK}
+    truth "${lldb_managed:-false}" && return ${ERR_EXELOCK}
+    if wda_ready && exists "${driver_session}"; then
+      return 0
+    fi
+  fi
 
-  tmux kill-session -t "${session}" 2>/dev/null || true
-  export appium_restart=true
-  case ${appium_mode} in
+  case ${appium_mode:-full} in
+    full) unset -v appium_restart ;;
+    restart|test-driver-only|relaunch-test-driver|activate-ipa)
+      export appium_restart=true
+      ;;
+  esac
+  case ${appium_mode:-full} in
+    full|restart)
+      ;;
     test-driver-only)
       stopdriver
       builddriver || return
       ;;
     relaunch-test-driver)
-      ensuredriverstate || {
-        perr "FMPS Test Driver is not installed; use the t workflow first"
-        return ${ERR_PROJECT}
-      }
       launchdriver || return
       ;;
     activate-ipa)
@@ -945,28 +1074,17 @@ provision() {
         perr "target IPA not found: ${target_app_ipa}"
         return ${ERR_PROJECT}
       }
-      local reuse=false runner
-      ensuredriverstate || true
-      if [[ -r ${driverstate} ]]; then
-        runner=$( jq -r '.runner_bundle // empty' "${driverstate}" )
-        if [[ -n ${runner} ]] && driverinstalled "${runner}"; then
-          reuse=true
-        fi
-      fi
-      ${reuse} && stopdriver
       installapp "${target_app_ipa}" || return
-      if ${reuse}; then
-        launchdriver || return
-      else
-        unset -v service_url
-        export service_url="http://localhost:${driver_port}"
-      fi
       ;;
     *)
       perr "unsupported Appium mode: ${appium_mode}"
       return ${ERR_UNKNOWN}
       ;;
   esac
+  if [[ ${driver_recovery:-false} == true ]]; then
+    exists "${session}" || return ${ERR_EXELOCK}
+  fi
+  tmux kill-session -t "${session}" 2>/dev/null || true
   create "${session}" "${startin}"
 }
 
@@ -974,9 +1092,18 @@ provision() {
 #  main
 # ------------------------------------------------------------------------------
 
+if [[ ${1:-} == --watch-driver ]]; then
+  watchdriver
+  exit $?
+fi
+if [[ ${1:-} == --recover-driver ]]; then
+  export appium_mode=relaunch-test-driver
+  driver_recovery=true
+fi
+
 trap "
 appiumd_exit_status=\${?}
-rm -f '${cfglock}'
+if [[ \${config_locked:-false} == true ]]; then rm -f '${cfglock}'; fi
 if [[ -n \${provision_locked:-} ]]; then
   rm -f '${provisionpid}'
   rmdir '${provisionlock}' 2>/dev/null || true
@@ -986,16 +1113,23 @@ if [[ \${appiumd_exit_status} -eq 0 ]] && exists '${session}'; then
 fi
 " EXIT
 
-case ${appium_mode:-full} in
-  test-driver-only|relaunch-test-driver|activate-ipa)
+case ${appium_mode:-} in
+  test-driver-only|relaunch-test-driver|activate-ipa|full|restart)
     provision
     exit $?
+    ;;
+  '')
+    if [[ ${FSDS_APPIUM_LAUNCHER:-} != launchctl ]]; then
+      provision
+      exit $?
+    fi
     ;;
 esac
 
 #create "${session}" "${startin}"
 case ${FSDS_APPIUM_LAUNCHER} in
   launchctl)
+    export appium_restart=true
     if exists "${session}"; then
       pout "appiumd: existing session detected; LaunchAgent will wait until it ends before starting" |& tee -a "${logserv}"
       while exists "${session}"; do
@@ -1014,5 +1148,6 @@ case ${FSDS_APPIUM_LAUNCHER} in
 esac
 
 exists "${session}" || create "${session}" "${startin}"
+
 
 set +x

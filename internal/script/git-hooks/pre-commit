@@ -1,0 +1,14 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+my $prefix = do { chomp($_ = `git rev-parse --show-toplevel`); $_ };
+
+open my $fh, qq(go test -C $prefix -v ./... |)
+	or die "Failed to run go test: $!";
+
+print while <$fh>;
+close $fh; # populates $?, stores forked process exit status in bits 8..15.
+
+exit $? >> 8;

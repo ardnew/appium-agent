@@ -42,11 +42,16 @@ func DefaultEnv() Env {
 
 	env = append(env, NewVar("target-app-source", "p", "proj_source", String,
 		"",
-		"Directory `path` of the target app source code"))
+		"Directory `path` of the Calculator source code"))
+	env = append(env, NewVar("test-driver-source", "", "test_driver_source", String,
+		"",
+		"Directory `path` of the FMPS Test Driver source code"))
+	env = append(env, NewVar("test-driver-scheme", "", "test_driver_scheme", String,
+		"FMPS Calculator",
+		"Build test driver using `scheme` defined in its Xcode project file"))
 	env = append(env, NewVar("target-app-ipa", "", "target_app_ipa", String,
 		"",
 		"Canonical `path` of a pre-built target app IPA"))
-
 	env = append(env, NewVar("target-app-scheme", "s", "proj_scheme", String,
 		"FMPS Calculator",
 		"Build target app using `scheme` defined in Xcode project file"))
